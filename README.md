@@ -1,0 +1,2 @@
+# shiftycoin.py
+real
