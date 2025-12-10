@@ -511,6 +511,9 @@ async def bj(ctx):
 @bj.command(name="start")
 async def bj_start(ctx, bet = 0):
     uid = ctx.author.id
+    if bet < 0 :
+        await ctx.send("Bet must be a positive number.")
+        return
     if uid in ACTIVE_GAMES and not ACTIVE_GAMES[uid].finished:
         await ctx.send("You already have an active game. Use `!bj hit` or `!bj stand`.")
         return
