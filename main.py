@@ -83,6 +83,7 @@ class BlackjackGame:
         w = 0
         if p > 21:
             self.shiftycoinResult = (p / 10) * -1
+            w = 0
         elif d > 21:
             self.shiftycoinResult = p / 10
             w = 1
@@ -91,15 +92,21 @@ class BlackjackGame:
             w = 1
         elif p < d:
             self.shiftycoinResult = (p / 10) * -1
+            w = 0
         else:
             self.shiftycoinResult = 0
-        if get_bet([uid]) != 0 & w == 1 :
-            self.shiftycoinResult = get_bet([uid])
-            #print (self.shiftycoinResult, "win w bet")
-        elif get_bet([uid]) != 0 & w == 0 :
-            self.shiftycoinResult = get_bet([uid]) * -1
-            #print (self.shiftycoinResult, "lose w bet")
+            w = 0
+        #print (w, "w")
+        #print (uid, "uid")
+        #print (get_bet([uid]), "bet")
+        
         if self.finished == True :
+            if get_bet([uid]) != 0 and w == 1 :
+                self.shiftycoinResult = get_bet([uid])
+                #print (self.shiftycoinResult, "win w bet")
+            elif get_bet([uid]) != 0 and w == 0 :
+                self.shiftycoinResult = get_bet([uid]) * -1
+                #print (self.shiftycoinResult, "lose w bet")
             return self.shiftycoinResult
         else :
             return 0
