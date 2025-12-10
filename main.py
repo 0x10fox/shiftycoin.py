@@ -95,7 +95,7 @@ class BlackjackGame:
             w = 0
         else:
             self.shiftycoinResult = 0
-            w = 0
+            w = 2
         #print (w, "w")
         #print (uid, "uid")
         #print (get_bet([uid]), "bet")
@@ -107,6 +107,9 @@ class BlackjackGame:
             elif get_bet([uid]) != 0 and w == 0 :
                 self.shiftycoinResult = get_bet([uid]) * -1
                 #print (self.shiftycoinResult, "lose w bet")
+            elif get_bet([uid]) != 0 and w == 2 :
+                self.shiftycoinResult = 0
+                #print (self.shiftycoinResult, "push w bet")
             return self.shiftycoinResult
         else :
             return 0
