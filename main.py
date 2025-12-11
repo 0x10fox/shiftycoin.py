@@ -18,6 +18,14 @@ INTENTS.message_content = True
 RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 SUITS = ["♠", "♥", "♦", "♣"]
 
+# reaction rewards
+REWARD_EMOTE = "👍"  # emote that gives shiftycoin
+PENALTY_EMOTE = "👎"  # emote that removes shiftycoin
+REACTIONS_PER_SC = 2  # number of reactions needed per shiftycoin
+
+# track reactions per message to avoid duplicate processing
+PROCESSED_REACTIONS = {}
+
 def new_deck(shuffle=True):
     deck = [f"{r}{s}" for r in RANKS for s in SUITS]
     if shuffle:
@@ -154,6 +162,30 @@ def add_balance(user_id, amount):
     shiftycoin[user_id] = shiftycoin.get(user_id, 0.0) + amount
     save_shiftycoin(shiftycoin)
     return shiftycoin[user_id]
+
+# the great wealth redistributor 
+def mass_redistribute_shiftycoin():
+    shiftycoin = load_shiftycoin()
+    if not shiftycoin:
+        return {}
+
+    # cents because floating point precision is bad
+    total_cents = sum(int(round(float(v) * 100)) for v in shiftycoin.values())
+    users = sorted(shiftycoin.keys())  # deterministic order for remainder distribution
+    n = len(users)
+    if n == 0:
+        return {}
+
+    share_cents = total_cents // n
+    remainder = total_cents % n
+
+    new_balances = {}
+    for idx, uid in enumerate(users):
+        cents = share_cents + (1 if idx < remainder else 0)
+        new_balances[uid] = round(cents / 100.0, 2)
+
+    save_shiftycoin(new_balances)
+    return new_balances
 
 # betting json logic for bj
 bet = {}
@@ -327,6 +359,47 @@ bot = commands.Bot(command_prefix=PREFIX, intents=INTENTS, help_command=None)
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
     print("shiftycoin broker has entered the chatroom.")
+    # status
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.playing, name=config.get("status")))
+
+# process incoming reactions
+@bot.event
+async def on_reaction_add(reaction, user):
+    if user.bot or reaction.message.author.bot:
+        return
+    
+    message_id = reaction.message.id
+    if message_id not in PROCESSED_REACTIONS:
+        PROCESSED_REACTIONS[message_id] = {"reward": 0, "penalty": 0}
+    
+    # count reactions
+    if str(reaction.emoji) == REWARD_EMOTE:
+        PROCESSED_REACTIONS[message_id]["reward"] = reaction.count
+        sc_change = PROCESSED_REACTIONS[message_id]["reward"] // REACTIONS_PER_SC
+        if sc_change > 0:
+            add_balance(reaction.message.author.id, sc_change)
+    
+    elif str(reaction.emoji) == PENALTY_EMOTE:
+        PROCESSED_REACTIONS[message_id]["penalty"] = reaction.count
+        sc_change = PROCESSED_REACTIONS[message_id]["penalty"] // REACTIONS_PER_SC
+        if sc_change > 0:
+            add_balance(reaction.message.author.id, -sc_change)
+
+# process removed reactions
+@bot.event
+async def on_reaction_remove(reaction, user):
+    if user.bot or reaction.message.author.bot:
+        return
+    
+    message_id = reaction.message.id
+    if message_id not in PROCESSED_REACTIONS:
+        PROCESSED_REACTIONS[message_id] = {"reward": 0, "penalty": 0}
+    
+    # adjust counts
+    if str(reaction.emoji) == REWARD_EMOTE:
+        PROCESSED_REACTIONS[message_id]["reward"] = max(0, reaction.count)
+    elif str(reaction.emoji) == PENALTY_EMOTE:
+        PROCESSED_REACTIONS[message_id]["penalty"] = max(0, reaction.count)
 
 @bot.group(name="sc", invoke_without_command=True)
 async def sc(ctx):
@@ -430,6 +503,17 @@ async def send(ctx, member: discord.Member, amount: float):
 
         await ctx.send(f"Request sent to {member.mention} for **{amount} SC**. They will receive a DM with the request.")
 
+@sc.command(name="redistribute")
+async def redistribute(ctx):
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("You do not have permission to use this command.")
+        return
+    new_balances = mass_redistribute_shiftycoin()
+    if not new_balances:
+        await ctx.send("there is no economy :(")
+        return
+    await ctx.send(f"The Great Redistribution has occurred. The playing field has been leveled for all {len(new_balances)} individuals. \n"
+                   "**May the members of KAAISUSERVER find renewed hope and opportunity in this new era of equality.**")
 
 # loan commands
 @bot.group(name="loan", invoke_without_command=True)
@@ -525,6 +609,9 @@ async def bj_start(ctx, bet = 0):
         await ctx.send("Bet must be a positive number.")
         return
     if get_balance(uid) < 0 :
+        await ctx.send("You do not have enough Shiftycoin to place a bet.")
+        return
+    if get_balance(uid) < bet :
         await ctx.send("You do not have enough Shiftycoin to place a bet.")
         return
     if uid in ACTIVE_GAMES and not ACTIVE_GAMES[uid].finished:
@@ -632,8 +719,8 @@ async def bj_stop(ctx):
         return
     await ctx.send("Your game was stopped and removed.")
 
-@bot.command(name="help")
-async def help(ctx):
+@bot.command(name="directory")
+async def directory(ctx):
     await ctx.send(
         "**Blackjack Commands**\n"
         "`!bj start <bet (optional)>` - start a new game (default bet is semi random)\n"

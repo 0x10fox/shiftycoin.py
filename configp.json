@@ -1,4 +1,5 @@
 {
-        "token": "my token goes here"
+        "token": "my token goes here",
+        "status": "my status goes here"
 
 }
