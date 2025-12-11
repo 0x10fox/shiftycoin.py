@@ -524,6 +524,9 @@ async def bj_start(ctx, bet = 0):
     if bet < 0 :
         await ctx.send("Bet must be a positive number.")
         return
+    if get_balance(uid) < 0 :
+        await ctx.send("You do not have enough Shiftycoin to place a bet.")
+        return
     if uid in ACTIVE_GAMES and not ACTIVE_GAMES[uid].finished:
         await ctx.send("You already have an active game. Use `!bj hit` or `!bj stand`.")
         return
