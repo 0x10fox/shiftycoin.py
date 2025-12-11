@@ -485,77 +485,77 @@ async def send(ctx, member: discord.Member, amount: float):
         f"{member.mention}'s new balance: **{new_receiver_bal} SC**"
     )
 
-    @sc.command(name="request")
-    async def request_sc(ctx, member: discord.Member, amount: float):
-        if amount <= 0:
-            await ctx.send("Amount must be positive.")
-            return
-        if member.bot:
-            await ctx.send("Cannot request from a bot.")
-            return
+@sc.command(name="request")
+async def request_sc(ctx, member: discord.Member, amount: float):
+    if amount <= 0:
+        await ctx.send("Amount must be positive.")
+        return
+    if member.bot:
+        await ctx.send("Cannot request from a bot.")
+        return
 
-        amount = round(amount, 2)
+    amount = round(amount, 2)
 
-        class PayView(discord.ui.View):
-            def __init__(self, requester_id: int, payer_id: int, amount: float):
-                super().__init__(timeout=None)
-                self.requester_id = requester_id
-                self.payer_id = payer_id
-                self.amount = amount
-                self.paid = False
+    class PayView(discord.ui.View):
+        def __init__(self, requester_id: int, payer_id: int, amount: float):
+            super().__init__(timeout=None)
+            self.requester_id = requester_id
+            self.payer_id = payer_id
+            self.amount = amount
+            self.paid = False
 
-            @discord.ui.button(label="Pay", style=discord.ButtonStyle.green)
-            async def pay(self, interaction: discord.Interaction, button: discord.ui.Button):
-                # only the intended payer can press
-                if interaction.user.id != self.payer_id:
-                    await interaction.response.send_message("This request is not for you.", ephemeral=True)
-                    return
-                if self.paid:
-                    await interaction.response.send_message("This request has already been paid.", ephemeral=True)
-                    return
+        @discord.ui.button(label="Pay", style=discord.ButtonStyle.green)
+        async def pay(self, interaction: discord.Interaction, button: discord.ui.Button):
+            # only the intended payer can press
+            if interaction.user.id != self.payer_id:
+                await interaction.response.send_message("This request is not for you.", ephemeral=True)
+                return
+            if self.paid:
+                await interaction.response.send_message("This request has already been paid.", ephemeral=True)
+                return
 
-                payer_bal = get_balance(self.payer_id)
-                if payer_bal < self.amount:
-                    await interaction.response.send_message("Insufficient balance to pay.", ephemeral=True)
-                    return
+            payer_bal = get_balance(self.payer_id)
+            if payer_bal < self.amount:
+                await interaction.response.send_message("Insufficient balance to pay.", ephemeral=True)
+                return
 
-                # perform transfer
-                add_balance(self.payer_id, -self.amount)
-                new_receiver_bal = add_balance(self.requester_id, self.amount)
-                self.paid = True
+            # perform transfer
+            add_balance(self.payer_id, -self.amount)
+            new_receiver_bal = add_balance(self.requester_id, self.amount)
+            self.paid = True
 
-                # disable the button and edit the original message
-                button.disabled = True
-                await interaction.response.edit_message(
-                    content=f"You paid **{self.amount} SC** to <@{self.requester_id}>. Your new balance: **{get_balance(self.payer_id)} SC**",
-                    view=self
-                )
+            # disable the button and edit the original message
+            button.disabled = True
+            await interaction.response.edit_message(
+                content=f"You paid **{self.amount} SC** to <@{self.requester_id}>. Your new balance: **{get_balance(self.payer_id)} SC**",
+                view=self
+            )
 
-                # notify requester (try DM, fallback to no-op)
-                requester = bot.get_user(self.requester_id)
-                if requester:
-                    try:
-                        await requester.send(f"<@{self.payer_id}> paid you **{self.amount} SC**. Your new balance: **{new_receiver_bal} SC**")
-                    except Exception:
-                        # ignore if requester can't be DMed
-                        pass
+            # notify requester (try DM, fallback to no-op)
+            requester = bot.get_user(self.requester_id)
+            if requester:
+                try:
+                    await requester.send(f"<@{self.payer_id}> paid you **{self.amount} SC**. Your new balance: **{new_receiver_bal} SC**")
+                except Exception:
+                    # ignore if requester can't be DMed
+                    pass
 
-        dm_content = (
-            f"{ctx.author.mention} is requesting **{amount} SC** from you.\n"
-            "Click the button below to pay them."
-        )
-        view = PayView(ctx.author.id, member.id, amount)
+    dm_content = (
+        f"{ctx.author.mention} is requesting **{amount} SC** from you.\n"
+        "Click the button below to pay them."
+    )
+    view = PayView(ctx.author.id, member.id, amount)
 
-        try:
-            await member.send(dm_content, view=view)
-        except discord.Forbidden:
-            await ctx.send(f"Could not DM {member.mention}. They may have DMs disabled.")
-            return
-        except Exception:
-            await ctx.send("Failed to send request DM.")
-            return
+    try:
+        await member.send(dm_content, view=view)
+    except discord.Forbidden:
+        await ctx.send(f"Could not DM {member.mention}. They may have DMs disabled.")
+        return
+    except Exception:
+        await ctx.send("Failed to send request DM.")
+        return
 
-        await ctx.send(f"Request sent to {member.mention} for **{amount} SC**. They will receive a DM with the request.")
+    await ctx.send(f"Request sent to {member.mention} for **{amount} SC**. They will receive a DM with the request.")
 
 @sc.command(name="redistribute")
 async def redistribute(ctx):
