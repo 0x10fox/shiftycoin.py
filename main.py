@@ -582,6 +582,9 @@ async def sc_loan_take(ctx, amount: float):
         if amount <= 0:
             await ctx.send("Amount must be positive.")
             return
+        if amount > 500.0:
+            await ctx.send("Maximum single loan amount is 500 SC.")
+            return
         rec = take_loan_for_user(uid, amount)
         await ctx.send(
             f"{ctx.author.mention} took a loan of **{amount} SC**.\n"
@@ -790,8 +793,9 @@ async def directory(ctx):
         "`!loan take <amount>` - take out a loan\n"
         "`!loan repay <amount>` - repay part or all of your loan\n"
         "`!loan info <@user>` - show your or another user's loan info\n"
-        "`!loan accrue` - apply interest to your loans (admins can apply to all)\n"
-
+        "`!loan accrue` - apply interest to your loans (admins can apply to all)\n\n"
+        "**Reactions with ⭐ increases recieving user's Shiftycoin balance by 10.** \n"
+        "**Reactions with 💀 decreases recieving user's Shiftycoin balance by 20.**"
 
     )
 
