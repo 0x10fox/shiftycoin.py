@@ -19,9 +19,9 @@ RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 SUITS = ["♠", "♥", "♦", "♣"]
 
 # reaction rewards
-REWARD_EMOTE = "👍"  # emote that gives shiftycoin
-PENALTY_EMOTE = "👎"  # emote that removes shiftycoin
-REACTIONS_PER_SC = 2  # number of reactions needed per shiftycoin
+REWARD_EMOTE = "⭐"  # emote that gives shiftycoin
+PENALTY_EMOTE = "💀"  # emote that removes shiftycoin
+REACTIONS_PER_SC = 1  # number of reactions needed per shiftycoin
 
 # track reactions per message to avoid duplicate processing
 PROCESSED_REACTIONS = {}
@@ -362,6 +362,7 @@ async def on_ready():
     # status
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.playing, name=config.get("status")))
 
+'''
 # process incoming reactions
 @bot.event
 async def on_reaction_add(reaction, user):
@@ -375,13 +376,13 @@ async def on_reaction_add(reaction, user):
     # count reactions
     if str(reaction.emoji) == REWARD_EMOTE:
         PROCESSED_REACTIONS[message_id]["reward"] = reaction.count
-        sc_change = PROCESSED_REACTIONS[message_id]["reward"] // REACTIONS_PER_SC
+        sc_change = (PROCESSED_REACTIONS[message_id]["reward"] // REACTIONS_PER_SC) * 10
         if sc_change > 0:
             add_balance(reaction.message.author.id, sc_change)
     
     elif str(reaction.emoji) == PENALTY_EMOTE:
         PROCESSED_REACTIONS[message_id]["penalty"] = reaction.count
-        sc_change = PROCESSED_REACTIONS[message_id]["penalty"] // REACTIONS_PER_SC
+        sc_change = (PROCESSED_REACTIONS[message_id]["penalty"] // REACTIONS_PER_SC) * 20
         if sc_change > 0:
             add_balance(reaction.message.author.id, -sc_change)
 
@@ -400,6 +401,59 @@ async def on_reaction_remove(reaction, user):
         PROCESSED_REACTIONS[message_id]["reward"] = max(0, reaction.count)
     elif str(reaction.emoji) == PENALTY_EMOTE:
         PROCESSED_REACTIONS[message_id]["penalty"] = max(0, reaction.count)
+'''
+
+# new reaction system cuz the old one is messy and doesnt allow me to change the value of reactions
+APPLIED_REACTIONS = {}
+
+async def _sync_and_apply(message: discord.Message):
+    if message.author.bot:
+        return
+    mid = message.id
+    if mid not in APPLIED_REACTIONS:
+        APPLIED_REACTIONS[mid] = {"reward": 0, "penalty": 0}
+
+    reward_count = 0
+    penalty_count = 0
+    for r in message.reactions:
+        emoji_str = str(r.emoji)
+        if emoji_str == REWARD_EMOTE:
+            reward_count = r.count
+        elif emoji_str == PENALTY_EMOTE:
+            penalty_count = r.count
+
+    reward_units = reward_count // REACTIONS_PER_SC
+    penalty_units = penalty_count // REACTIONS_PER_SC
+
+    prev_reward = APPLIED_REACTIONS[mid]["reward"]
+    prev_penalty = APPLIED_REACTIONS[mid]["penalty"]
+
+    delta_reward = reward_units - prev_reward
+    #print(delta_reward, "delta reward")
+    delta_penalty = penalty_units - prev_penalty
+    #print(delta_penalty, "delta penalty")
+
+    # apply reward delta (+10 per unit) and penalty delta (-20 per unit)
+    if delta_reward != 0:
+        add_balance(message.author.id, delta_reward * 10)
+    if delta_penalty != 0:
+        add_balance(message.author.id, delta_penalty * -20)
+
+    APPLIED_REACTIONS[mid]["reward"] = reward_units
+    APPLIED_REACTIONS[mid]["penalty"] = penalty_units
+
+async def _on_reaction_event(reaction, user):
+    if user.bot or reaction.message.author.bot:
+        return
+    try:
+        # fetch fresh message to get accurate reaction counts which only half works but okay
+        msg = await reaction.message.channel.fetch_message(reaction.message.id)
+    except Exception:
+        msg = reaction.message
+    await _sync_and_apply(msg)
+
+bot.add_listener(_on_reaction_event, 'on_reaction_add')
+bot.add_listener(_on_reaction_event, 'on_reaction_remove')
 
 @bot.group(name="sc", invoke_without_command=True)
 async def sc(ctx):
