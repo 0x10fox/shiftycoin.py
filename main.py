@@ -319,7 +319,7 @@ def repay_loan_for_user(user_id, amount):
         rec["balance"] = 0.0
         # reduce active_count by 1 when fully paid off (if >0)
         if rec.get("active_count", 0) > 0:
-            rec["active_count"] = max(0, rec["active_count"] - 1)
+            rec["active_count"] = max(0, rec["active_count"] - rec["active_count"])
         rec["rate"] = compute_rate_for_count(rec.get("active_count", 0))
         set_loan_record(user_id, rec)
         # if overpayment, refund to shiftycoin balance
@@ -567,7 +567,35 @@ async def redistribute(ctx):
         await ctx.send("there is no economy :(")
         return
     await ctx.send(f"The Great Redistribution has occurred. The playing field has been leveled for all {len(new_balances)} individuals. \n"
-                   "**May the members of KAAISUSERVER find renewed hope and opportunity in this new era of equality.**")
+                   "**May the users of our Shiftycoin find renewed hope and opportunity in this new era of equality.**")
+
+@sc.command(name="globalbal")
+async def globalbal(ctx):
+    shiftycoin = load_shiftycoin()
+    def get_global_balance():
+        shiftycoin = load_shiftycoin()
+        total = sum(float(v) for v in shiftycoin.values())
+        return round(total, 2)
+    if not shiftycoin:
+        await ctx.send("No balances recorded.")
+        return
+
+    # sort by balance descending
+    items = sorted(shiftycoin.items(), key=lambda kv: -float(kv[1]))
+    lines = [f"<@{uid}>: **{float(bal):.2f} SC**" for uid, bal in items]
+
+    header = "Shiftycoin balances:\n"
+    # send in chunks to avoid hitting discord message length limit
+    chunk = header
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 2000:
+            await ctx.send(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        await ctx.send(chunk)
+    total = get_global_balance()
+    await ctx.send(f"Global Shiftycoin balance: **{total} SC**")
 
 # loan commands
 @bot.group(name="loan", invoke_without_command=True)
@@ -656,8 +684,8 @@ async def sc_loan_accrue(ctx):
 
 @bot.group(name="bj", invoke_without_command=True)
 async def bj(ctx):
-    """Root command for blackjack. Use subcommands: start, hit, stand, hand, stop."""
-    await ctx.send("Blackjack commands: `!bj start <custom bet (optional)>` `!bj hit` `!bj stand` `!bj hand` `!bj stop`")
+    """Root command for blackjack. Use subcommands: start, hit, stand, hand."""
+    await ctx.send("Blackjack commands: `!bj start <custom bet (optional)>` `!bj hit` `!bj stand` `!bj hand`")
 
 @bj.command(name="start")
 async def bj_start(ctx, bet = 0):
@@ -766,7 +794,7 @@ async def bj_hand(ctx):
         f"Your hand: {hand_str(game.player)} (Total: {score_hand(game.player)})\n"
         f"Dealer shows: {game.dealer[0]}"
     )
-
+'''
 @bj.command(name="stop")
 async def bj_stop(ctx):
     uid = ctx.author.id
@@ -775,7 +803,7 @@ async def bj_stop(ctx):
         await ctx.send("No active game to stop.")
         return
     await ctx.send("Your game was stopped and removed.")
-
+'''
 @bot.command(name="directory")
 async def directory(ctx):
     await ctx.send(
@@ -783,8 +811,7 @@ async def directory(ctx):
         "`!bj start <bet (optional)>` - start a new game (default bet is semi random)\n"
         "`!bj hit` - draw a card\n"
         "`!bj stand` - end your turn, dealer plays\n"
-        "`!bj hand` - show current hand\n"
-        "`!bj stop` - stop and discard your game\n\n"
+        "`!bj hand` - show current hand\n\n"
         "**Shiftycoin Commands**\n"
         "`!sc bal` - show your balance\n"
         "`!sc send <@user> <amount>` - send shiftycoin to another user\n"
