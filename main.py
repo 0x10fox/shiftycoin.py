@@ -455,6 +455,122 @@ async def _on_reaction_event(reaction, user):
 bot.add_listener(_on_reaction_event, 'on_reaction_add')
 bot.add_listener(_on_reaction_event, 'on_reaction_remove')
 
+# moderation logging
+LOG_CHANNEL_NAMES = ("mod-log", "mod_log", "logs", "moderation-log", "moderation", "log")
+
+def _find_log_channel_for_guild(guild: discord.Guild):
+    # try configured channel id first (global config)
+    cid = config.get("log_channel_id")
+    if cid:
+        try:
+            cid_i = int(cid)
+            ch = bot.get_channel(cid_i)
+            if ch and getattr(ch, "guild", None) == guild:
+                return ch
+        except Exception:
+            pass
+    # fallback: find commonly named channel in the guild
+    for name in LOG_CHANNEL_NAMES:
+        ch = discord.utils.get(guild.text_channels, name=name)
+        if ch:
+            return ch
+    return None
+
+
+async def _send_log_embed(guild: discord.Guild, title: str, description: str, color: discord.Colour = discord.Colour.orange()):
+    ch = _find_log_channel_for_guild(guild)
+    if not ch:
+        return
+    embed = discord.Embed(title=title, description=description, color=color, timestamp=datetime.datetime.now(datetime.UTC))
+    try:
+        await ch.send(embed=embed)
+    except Exception:
+        # best-effort only
+        pass
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    # only log guild messages
+    if message.guild is None:
+        return
+    # ignore if the message was sent by a bot (optional)
+    if message.author and message.author.bot:
+        return
+    author = message.author
+    channel = message.channel
+    content = message.content or ""
+    # include attachments if present
+    files_info = ""
+    if message.attachments:
+        urls = [a.url for a in message.attachments]
+        files_info = "\nAttachments:\n" + "\n".join(urls)
+    # truncate long content for embed
+    if len(content) > 1500:
+        content = content[:1500] + "… (truncated)"
+    desc = (
+        f"Message deleted in {channel.mention}\n"
+        f"Author: {author.mention} (`{author.id}`)\n"
+        f"Message ID: `{message.id}`\n\n"
+        f"Content:\n{content}"
+        f"{files_info}"
+    )
+    await _send_log_embed(message.guild, "Message Deleted", desc, discord.Colour.red())
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user: discord.User):
+    # try to pull reason from audit logs (best-effort)
+    reason = None
+    try:
+        async for entry in guild.audit_logs(limit=6, action=discord.AuditLogAction.ban):
+            if entry.target and getattr(entry.target, "id", None) == user.id:
+                reason = entry.reason
+                moderator = entry.user
+                break
+    except Exception:
+        moderator = None
+
+    desc = f"User: {user} (`{getattr(user, 'id', 'unknown')}`)\n"
+    if moderator:
+        desc += f"Banned by: {moderator.mention} (`{moderator.id}`)\n"
+    if reason:
+        desc += f"Reason: {reason}\n"
+    await _send_log_embed(guild, "Member Banned", desc, discord.Colour.dark_red())
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # detect role changes related to a role named "Muted" (case-insensitive)
+    before_roles = {r.id: r for r in before.roles}
+    after_roles = {r.id: r for r in after.roles}
+
+    # find any role objects named Muted in either snapshot
+    muted_before = None
+    muted_after = None
+    for r in before.roles:
+        if r.name.lower() == "muted":
+            muted_before = r
+            break
+    for r in after.roles:
+        if r.name.lower() == "muted":
+            muted_after = r
+            break
+
+    # role was added -> muted
+    if not muted_before and muted_after:
+        # try to find moderator & reason from audit logs (role updates do not appear in audit logs reliably)
+        desc = (
+            f"User muted: {after.mention} (`{after.id}`)\n"
+            f"Role: {muted_after.name}\n"
+        )
+        await _send_log_embed(after.guild, "Member Muted", desc, discord.Colour.orange())
+
+    # role was removed -> unmuted
+    if muted_before and not muted_after:
+        desc = (
+            f"User unmuted: {after.mention} (`{after.id}`)\n"
+            f"Role removed: {muted_before.name}\n"
+        )
+        await _send_log_embed(after.guild, "Member Unmuted", desc, discord.Colour.green())
+
 @bot.group(name="sc", invoke_without_command=True)
 async def sc(ctx):
     """Root command for shiftycoin. Use subcommands: balance, send, request."""
@@ -804,6 +920,80 @@ async def bj_stop(ctx):
         return
     await ctx.send("Your game was stopped and removed.")
 '''
+
+@bot.group(name="user", invoke_without_command=True)
+async def user(ctx):
+    """Root command for user management functions. Use subcommands: !user kick, !user ban, !user unban, !user mute, !user unmute."""
+    await ctx.send("User management commands: `!user kick <user>` `!user ban <user>` `!user unban <user>` `!user mute <user> <duration>` `!user unmute <user>`")
+
+@user.command(name="kick")
+async def kick(ctx, member: discord.Member, *, reason=None):
+    if not ctx.author.guild_permissions.kick_members:
+        await ctx.send("You do not have permission to kick members.")
+        return
+    try:
+        await member.kick(reason=reason)
+        await ctx.send(f"{member.mention} has been kicked. Reason: {reason}")
+    except Exception as e:
+        await ctx.send(f"Failed to kick {member.mention}. Error: {e}")
+
+@user.command(name="ban")
+async def ban(ctx, member: discord.Member, *, reason=None): 
+    if not ctx.author.guild_permissions.ban_members:
+        await ctx.send("You do not have permission to ban members.")
+        return
+    try:
+        await member.ban(reason=reason)
+        await ctx.send(f"{member.mention} has been banned. Reason: {reason}")
+    except Exception as e:
+        await ctx.send(f"Failed to ban {member.mention}. Error: {e}")
+
+@user.command(name="mute")
+async def mute(ctx, member: discord.Member, duration: int):
+    if not ctx.author.guild_permissions.manage_roles:
+        await ctx.send("You do not have permission to mute members.")
+        return
+    mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
+    if not mute_role:
+        # create Muted role if it doesn't exist
+        mute_role = await ctx.guild.create_role(name="Muted")
+        for channel in ctx.guild.channels:
+            await channel.set_permissions(mute_role, speak=False, send_messages=False, read_message_history=True, read_messages=False)
+    try:
+        await member.add_roles(mute_role)
+        await ctx.send(f"{member.mention} has been muted for {duration} minutes.")
+        await asyncio.sleep(duration * 60)
+        await member.remove_roles(mute_role)
+        await ctx.send(f"{member.mention} has been unmuted.")
+    except Exception as e:
+        await ctx.send(f"Failed to mute {member.mention}. Error: {e}")
+
+@user.command(name="unmute")
+async def unmute(ctx, member: discord.Member):
+    if not ctx.author.guild_permissions.manage_roles:
+        await ctx.send("You do not have permission to unmute members.")
+        return
+    mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
+    if not mute_role:
+        await ctx.send("Muted role does not exist.")
+        return
+    try:
+        await member.remove_roles(mute_role)
+        await ctx.send(f"{member.mention} has been unmuted.")
+    except Exception as e:
+        await ctx.send(f"Failed to unmute {member.mention}. Error: {e}")
+
+@user.command(name="unban")
+async def unban(ctx, user: discord.User):
+    if not ctx.author.guild_permissions.ban_members:
+        await ctx.send("You do not have permission to unban members.")
+        return
+    try:
+        await ctx.guild.unban(user)
+        await ctx.send(f"{user.mention} has been unbanned.")
+    except Exception as e:
+        await ctx.send(f"Failed to unban {user.mention}. Error: {e}")
+
 @bot.command(name="directory")
 async def directory(ctx):
     await ctx.send(
@@ -821,6 +1011,12 @@ async def directory(ctx):
         "`!loan repay <amount>` - repay part or all of your loan\n"
         "`!loan info <@user>` - show your or another user's loan info\n"
         "`!loan accrue` - apply interest to your loans (admins can apply to all)\n\n"
+        "**User Management Commands**\n"
+        "`!user kick <@user>` - kick a user from the server\n"
+        "`!user ban <@user>` - ban a user from the server\n"
+        "`!user unban <user id>` - unban a user from the server\n"
+        "`!user mute <@user> <duration in minutes>` - mute a user for a duration\n"
+        "`!user unmute <@user>` - unmute a user\n\n"
         "**Reactions with ⭐ increases recieving user's Shiftycoin balance by 10.** \n"
         "**Reactions with 💀 decreases recieving user's Shiftycoin balance by 20.**"
 
