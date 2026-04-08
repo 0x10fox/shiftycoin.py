@@ -714,6 +714,42 @@ async def _on_reaction_event(reaction, user):
 bot.add_listener(_on_reaction_event, 'on_reaction_add')
 bot.add_listener(_on_reaction_event, 'on_reaction_remove')
 
+PAYROLLS_FILE = "payrolls.json"
+
+def load_payrolls():
+    if os.path.exists(PAYROLLS_FILE):
+        try:
+            with open(PAYROLLS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_payrolls(data):
+    try:
+        with open(PAYROLLS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+def _parse_user_identifier(ctx, recipient: str):
+    """Try to resolve a recipient string to a user id (int) or return None."""
+    uid = None
+    stripped = "".join(ch for ch in recipient if ch.isdigit())
+    if stripped:
+        try:
+            uid = int(stripped)
+        except Exception:
+            uid = None
+    if uid is None and ctx.guild:
+        member = discord.utils.find(lambda m: m.name == recipient or (m.nick and m.nick == recipient), ctx.guild.members)
+        if member:
+            uid = member.id
+    return uid
+
+def _today_iso():
+    return _today_date().isoformat()
+
 # user surveillance
 
 @bot.group(name="srvl", invoke_without_command=True)
@@ -933,9 +969,14 @@ async def sc(ctx):
     await ctx.send("Shiftycoin commands: `!sc bal` `!sc send` `!sc request`")
 
 @sc.command(name="bal")
-async def balance(ctx):
-    bal = get_balance(ctx.author.id)
-    await ctx.send(f"{ctx.author.mention}, your balance: **{bal} SC**")
+async def balance(ctx, member: discord.Member = None):
+    """Show your balance or another member's balance."""
+    target = member or ctx.author
+    bal = get_balance(target.id)
+    if member:
+        await ctx.send(f"{ctx.author.mention}: {target.mention}'s balance: **{float(bal):.2f} SC**")
+    else:
+        await ctx.send(f"{ctx.author.mention}, your balance: **{float(bal):.2f} SC**")
 
 @sc.command(name="send")
 async def send(ctx, member: discord.Member, amount: float):
@@ -1505,6 +1546,219 @@ async def corp_deposit(ctx, identifier: str, amount: float):
         f"Your new balance: **{new_sender_bal:.2f} SC**\n"
         f"Business balance: **{new_acct_bal:.2f} SC**"
     )
+
+# payroll system for businesses
+
+
+@corp.group(name="payroll", invoke_without_command=True)
+async def corp_payroll(ctx):
+    await ctx.send("Payroll commands: `!corp payroll add <business> <@user/id/name> <amount> <bank|grant>` `!corp payroll rm <payroll_id>` `!corp payroll list` `!corp payroll run`")
+
+@corp_payroll.command(name="add")
+async def corp_payroll_add(ctx, identifier: str, recipient: str, amount: float, source: str = "bank"):
+    """Add a daily payroll entry for a business (source: bank or grant)."""
+    # find business
+    rec, bid = find_business(identifier)
+    if not rec:
+        await ctx.send("Business not found (use id or exact name).")
+        return
+
+    # permission: owner, server admin, or global owner
+    allowed = (ctx.author.id == int(rec.get("owner")) or ctx.author.guild_permissions.administrator or str(ctx.author.id) == str(OID))
+    if not allowed:
+        await ctx.send("You do not have permission to manage payrolls for this business.")
+        return
+
+    try:
+        amount = round(float(amount), 2)
+    except Exception:
+        await ctx.send("Invalid amount.")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be positive.")
+        return
+
+    source = source.lower()
+    if source not in ("bank", "grant"):
+        await ctx.send("Source must be 'bank' or 'grant'.")
+        return
+
+    uid = _parse_user_identifier(ctx, recipient)
+    if uid is None:
+        await ctx.send("Could not resolve recipient as a user (use mention, id, or exact name).")
+        return
+
+    payrolls = load_payrolls()
+    pid = str(uuid.uuid4())
+    payrolls[pid] = {
+        "id": pid,
+        "business_id": bid,
+        "recipient_id": int(uid),
+        "amount": round(amount, 2),
+        "source": source,
+        "last_paid": None,
+        "created_at": datetime.datetime.utcnow().isoformat() + "Z"
+    }
+    save_payrolls(payrolls)
+    await ctx.send(f"Payroll created (ID: `{pid}`): pay <@{uid}> **{amount:.2f} SC** daily from **{rec['name']}** ({source}).")
+
+@corp_payroll.command(name="rm")
+async def corp_payroll_rm(ctx, payroll_id: str):
+    payrolls = load_payrolls()
+    p = payrolls.get(payroll_id)
+    if not p:
+        await ctx.send("Payroll ID not found.")
+        return
+
+    # permission check: must be business owner, server admin, or OID
+    rec, bid = find_business(p.get("business_id"))
+    if not rec:
+        await ctx.send("Associated business record not found; cannot verify permission.")
+        return
+    allowed = (ctx.author.id == int(rec.get("owner")) or ctx.author.guild_permissions.administrator or str(ctx.author.id) == str(OID))
+    if not allowed:
+        await ctx.send("You do not have permission to remove this payroll.")
+        return
+
+    payrolls.pop(payroll_id, None)
+    save_payrolls(payrolls)
+    await ctx.send(f"Payroll `{payroll_id}` removed.")
+
+@corp_payroll.command(name="list")
+async def corp_payroll_list(ctx, identifier: str = None):
+    """List payroll entries. If identifier provided, filter to that business."""
+    payrolls = load_payrolls()
+    lines = []
+    for pid, p in payrolls.items():
+        if identifier:
+            # try to match by provided identifier (id or name)
+            brec, bid = find_business(identifier)
+            if not brec or bid != p.get("business_id"):
+                continue
+        lines.append(f"{pid} | Business: `{p.get('business_id')}` | Recipient: <@{p.get('recipient_id')}> | Amount: **{p.get('amount'):.2f} SC**/day | Source: {p.get('source')} | Last paid: {p.get('last_paid') or 'never'}")
+    if not lines:
+        await ctx.send("No payrolls found.")
+        return
+    # send in chunks
+    chunk = ""
+    for ln in lines:
+        if len(chunk) + len(ln) + 1 > 2000:
+            await ctx.send(chunk)
+            chunk = ""
+        chunk += ln + "\n"
+    if chunk:
+        await ctx.send(chunk)
+
+async def _process_payrolls():
+    """Process all payrolls due since last_paid (daily). Returns summary dict."""
+    payrolls = load_payrolls()
+    if not payrolls:
+        return {"processed": [], "skipped": []}
+    businesses = load_businesses()
+    shifty = load_shiftycoin()
+    today = _today_date()
+    processed = []
+    skipped = []
+
+    for pid, p in list(payrolls.items()):
+        bid = p.get("business_id")
+        biz = businesses.get(bid)
+        if not biz:
+            skipped.append({"id": pid, "reason": "business_not_found"})
+            continue
+        last_iso = p.get("last_paid")
+        if last_iso:
+            try:
+                last_date = datetime.date.fromisoformat(last_iso)
+            except Exception:
+                last_date = _today_date() - datetime.timedelta(days=1)
+        else:
+            # never paid -> pay for current day only
+            last_date = today - datetime.timedelta(days=1)
+
+        days_due = (today - last_date).days
+        if days_due <= 0:
+            continue  # not due
+
+        total_due = round(p.get("amount", 0.0) * days_due, 2)
+        recipient = p.get("recipient_id")
+        source = p.get("source")
+        if source == "bank":
+            acct = biz.get("account_key")
+            acct_bal = float(shifty.get(str(acct), 0.0))
+            if acct_bal < total_due:
+                skipped.append({"id": pid, "reason": "insufficient_bank_funds", "need": total_due, "have": acct_bal})
+                continue
+            # perform transfer
+            add_balance(acct, -total_due)
+            add_balance(recipient, total_due)
+            p["last_paid"] = today.isoformat()
+            payrolls[pid] = p
+            processed.append({"id": pid, "paid": total_due, "days": days_due})
+        else:  # grant
+            grant_bal = round(float(biz.get("grant_balance", 0.0)), 2)
+            if grant_bal < total_due:
+                skipped.append({"id": pid, "reason": "insufficient_grant_funds", "need": total_due, "have": grant_bal})
+                continue
+            # subtract grant and credit user
+            businesses[bid]["grant_balance"] = round(grant_bal - total_due, 2)
+            save_businesses(businesses)
+            add_balance(recipient, total_due)
+            p["last_paid"] = today.isoformat()
+            payrolls[pid] = p
+            processed.append({"id": pid, "paid": total_due, "days": days_due})
+
+    save_payrolls(payrolls)
+    return {"processed": processed, "skipped": skipped}
+
+@corp_payroll.command(name="run")
+async def corp_payroll_run(ctx, identifier: str = None):
+    """Manually run payroll processing. OID or appropriate permissions required to force run for all businesses."""
+    # allow server admins and OID to run global; otherwise allow anyone to run (it will only process due payrolls)
+    summary = await _process_payrolls()
+    processed = summary.get("processed", [])
+    skipped = summary.get("skipped", [])
+    lines = []
+    if processed:
+        for p in processed:
+            lines.append(f"Processed payroll `{p['id']}`: paid **{p['paid']:.2f} SC** ({p['days']} day(s)).")
+    if skipped:
+        for s in skipped:
+            reason = s.get("reason")
+            if reason == "insufficient_bank_funds" or reason == "insufficient_grant_funds":
+                lines.append(f"Skipped `{s['id']}`: insufficient funds (need {s['need']:.2f}, have {s['have']:.2f}).")
+            else:
+                lines.append(f"Skipped `{s['id']}`: {reason}.")
+    if not lines:
+        await ctx.send("No payrolls processed.")
+        return
+    # send in chunks if needed
+    chunk = ""
+    for ln in lines:
+        if len(chunk) + len(ln) + 1 > 2000:
+            await ctx.send(chunk)
+            chunk = ""
+        chunk += ln + "\n"
+    if chunk:
+        await ctx.send(chunk)
+
+# background worker to run payrolls once per day (roughly)
+async def _payroll_worker():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await _process_payrolls()
+        except Exception:
+            pass
+        # sleep until next day (24h)
+        await asyncio.sleep(24 * 60 * 60)
+
+# schedule worker
+try:
+    bot.loop.create_task(_payroll_worker())
+except Exception:
+    # best-effort scheduling; if loop not available nothing catastrophic happens
+    pass
 
 #bureau commands
 
