@@ -1288,7 +1288,7 @@ async def corp_start(ctx, *, name: str):
         await ctx.send(
             f"Business created: **{rec['name']}** (ID: `{rec['id']}`)\n"
             f"Owner: {ctx.author.mention}\n"
-            f"Main account key: `{rec['account_key']}`\n"
+            f"SC account key: `{rec['account_key']}`\n"
             f"Bank balance: **0.00 SC**\n"
             f"Grant balance: **{rec['grant_balance']:.2f} SC**"
         )
@@ -1296,21 +1296,69 @@ async def corp_start(ctx, *, name: str):
         await ctx.send(f"Failed to create business: {e}")
 
 @corp.command(name="pay")
-async def corp_pay(ctx, identifier: str, member: discord.Member, amount: float):
-    # find business
+async def corp_pay(ctx, identifier: str, recipient: str, amount: float):
+    # find payer business
     rec, bid = find_business(identifier)
     if not rec:
         await ctx.send("Business not found (use id or exact name).")
         return
+
     # permission: only business owner, server admin, or global owner may pay
-    allowed = (ctx.author.id == int(rec.get("owner")) or ctx.author.guild_permissions.administrator or ctx.author.id == OID)
+    allowed = (ctx.author.id == int(rec.get("owner")) or ctx.author.guild_permissions.administrator or str(ctx.author.id) == str(OID))
     if not allowed:
         await ctx.send("You do not have permission to pay from this business.")
         return
+
     try:
         amount = round(float(amount), 2)
-        new_bal = pay_from_business(bid, ctx.author.id, member.id, amount)
-        await ctx.send(f"Paid **{amount:.2f} SC** from **{rec['name']}** to {member.mention}.\nNew shiftycoin balance: **{new_bal:.2f} SC**")
+    except Exception:
+        await ctx.send("Invalid amount.")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be positive.")
+        return
+
+    try:
+        # Try recipient as a business first
+        target_rec, target_bid = find_business(recipient)
+        if target_rec:
+            target_acct = target_rec.get("account_key")
+            if not target_acct:
+                await ctx.send("Recipient business missing account key.")
+                return
+            new_bal = pay_from_business(bid, ctx.author.id, target_acct, amount)
+            await ctx.send(
+                f"Paid **{amount:.2f} SC** from **{rec['name']}** to business **{target_rec['name']}**.\n"
+                f"New {rec['name']} balance: **{new_bal:.2f} SC**"
+            )
+            return
+
+        # Resolve recipient as a user id/mention/name
+        uid = None
+        stripped = "".join(ch for ch in recipient if ch.isdigit())
+        if stripped:
+            try:
+                uid = int(stripped)
+            except Exception:
+                uid = None
+
+        if uid is None and ctx.guild:
+            member = discord.utils.find(lambda m: m.name == recipient or (m.nick and m.nick == recipient), ctx.guild.members)
+            if member:
+                uid = member.id
+
+        if uid is None:
+            try:
+                uid = int(recipient)
+            except Exception:
+                uid = None
+
+        if uid is None:
+            await ctx.send("Could not resolve recipient as a business or user (use business id/name or @user).")
+            return
+
+        new_bal = pay_from_business(bid, ctx.author.id, uid, amount)
+        await ctx.send(f"Paid **{amount:.2f} SC** from **{rec['name']}** to <@{uid}>.\nNew {rec['name']} balance: **{new_bal:.2f} SC**")
     except Exception as e:
         await ctx.send(f"Payment failed: {e}")
 
@@ -1368,14 +1416,20 @@ async def corp_grantpay(ctx, identifier: str, recipient: str, amount: float):
     # try recipient as business first
     target_rec, target_bid = find_business(recipient)
     if target_rec:
-        # transfer between business grants
+        # transfer from payer grant to recipient main account
         businesses[bid]["grant_balance"] = round(payer_grant - amount, 2)
-        businesses[target_bid]["grant_balance"] = round(float(businesses[target_bid].get("grant_balance", 0.0)) + amount, 2)
         save_businesses(businesses)
+        # credit recipient main account (account_key)
+        target_acct = businesses[target_bid].get("account_key")
+        if not target_acct:
+            await ctx.send("Recipient business missing account key.")
+            return
+        new_target_main = add_balance(target_acct, amount)
+        payer_new_grant = businesses[bid]["grant_balance"]
         await ctx.send(
-            f"Transferred **{amount:.2f} SC** from grant of **{rec['name']}** to grant of **{target_rec['name']}**.\n"
-            f"{rec['name']} grant: **{businesses[bid]['grant_balance']:.2f} SC** | "
-            f"{target_rec['name']} grant: **{businesses[target_bid]['grant_balance']:.2f} SC**"
+            f"Transferred **{amount:.2f} SC** from grant of **{rec['name']}** to SC account of **{target_rec['name']}**.\n"
+            f"{rec['name']} grant remaining: **{payer_new_grant:.2f} SC** | "
+            f"{target_rec['name']} SC balance: **{new_target_main:.2f} SC**"
         )
         return
 
@@ -1657,10 +1711,10 @@ async def directory(ctx):
         "`!loan accrue` - apply interest to your loans (admins can apply to all)\n\n"
         "**Business Commands**\n"
         "`!corp start <name>` - create a new business\n"
-        "`!corp pay <business/@user> <amount>` - pay a user from a business account\n"
+        "`!corp pay <business> <business/@user> <amount>` - pay a user from a business account\n"
         "`!corp deposit <business> <amount>` - deposit from your balance into a business account\n"
         "`!corp info <business>` - show info about a business\n"
-        "`!corp grantpay <business/@user> <recipient> <amount>` - pay from a business grant to a user or another business\n\n"
+        "`!corp grantpay <business> <recipient> <amount>` - pay from a business grant to a user or another business\n\n"
         "**User Management Commands**\n"
         "`!user kick <@user>` - kick a user from the server\n"
         "`!user ban <@user>` - ban a user from the server\n"
