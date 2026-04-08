@@ -199,7 +199,6 @@ def get_bet(user_id):
     user_id = str(user_id)
     return bet.get(user_id, 0.0)
 
-
 # loans logic
 BASE_LOAN_RATE = 0.02        # base monthly interest rate (2%)
 RATE_STEP_PER_LOAN = 0.005   # increase per active loan (0.5%)
@@ -351,6 +350,158 @@ def accrue_interest_all():
 # track blackjack games per user (by user id)
 ACTIVE_GAMES = {}
 
+# tax system
+TAX_ACCOUNT = "irs"
+TAX_INFO_FILE = "tax_info.json"
+
+def _load_tax_info():
+    if os.path.exists(TAX_INFO_FILE):
+        try:
+            with open(TAX_INFO_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _save_tax_info(info):
+    try:
+        with open(TAX_INFO_FILE, "w") as f:
+            json.dump(info, f, indent=2)
+    except Exception:
+        pass
+
+def compute_tax_rate(balance: float) -> float:
+    """Return tax rate (0.0-1.0) for a given balance according to brackets."""
+    b = float(balance)
+    if b >= 1_000_000_000:
+        return 0.99
+    if b > 100_000_000:
+        return 0.80
+    if b > 10_000_000:
+        return 0.65
+    if b > 1_000_000:
+        return 0.40
+    if b > 500_000:
+        return 0.30
+    if b > 100_000:
+        return 0.20
+    if b > 50_000:
+        return 0.10
+    if b > 10_000:
+        return 0.05
+    if b > 1_000:
+        return 0.03
+    return 0.0
+
+def compute_tax_amount(balance: float) -> float:
+    """Compute tax amount (rounded to 2 decimals) for a balance."""
+    rate = compute_tax_rate(balance)
+    if rate <= 0.0:
+        return 0.0
+    tax = round(float(balance) * rate, 2)
+    # never take more than the balance (guard against rounding anomalies)
+    tax = min(tax, round(float(balance), 2))
+    return tax
+
+def collect_taxes(force: bool = False):
+    """
+    Collect taxes for all users if a month boundary has passed since last collection,
+    or if force=True. Deposits collected taxes into TAX_ACCOUNT.
+    Returns a summary dict: {"months": n, "total_collected": X, "per_user": {uid:tax, ...}}
+    Also logs how many months have passed into TAX_INFO_FILE (for visibility).
+    """
+    info = _load_tax_info()
+    last_iso = info.get("last_collected")
+    if last_iso:
+        try:
+            last_date = datetime.date.fromisoformat(last_iso)
+        except Exception:
+            last_date = _first_of_month(_today_date())
+    else:
+        last_date = _first_of_month(_today_date())
+
+    months = _months_between(last_date, _first_of_month(_today_date()))
+    if months <= 0 and not force:
+        # log that no collection needed, store months=0
+        info["last_checked"] = _first_of_month(_today_date()).isoformat()
+        info["months_since_last_collection"] = months
+        _save_tax_info(info)
+        return {"months": 0, "total_collected": 0.0, "per_user": {}}
+
+    shiftycoin = load_shiftycoin()
+    if not shiftycoin:
+        # update last_collected anyway to avoid repeated no-op runs
+        info["last_collected"] = _first_of_month(_today_date()).isoformat()
+        info["months_since_last_collection"] = months if months > 0 else 0
+        _save_tax_info(info)
+        return {"months": months if months > 0 else 1, "total_collected": 0.0, "per_user": {}}
+
+    total_collected = 0.0
+    per_user = {}
+    # iterate deterministic order to keep reproducible behavior
+    for uid in sorted(shiftycoin.keys()):
+        # skip the treasury account itself
+        if str(uid) == str(TAX_ACCOUNT):
+            continue
+        try:
+            bal = float(shiftycoin.get(uid, 0.0))
+        except Exception:
+            bal = 0.0
+        if bal <= 0.0:
+            continue
+        tax = compute_tax_amount(bal)
+        if tax <= 0.0:
+            continue
+        # subtract tax from user balance and accumulate
+        new_user_bal = round(bal - tax, 2)
+        shiftycoin[uid] = new_user_bal
+        per_user[uid] = tax
+        total_collected = round(total_collected + tax, 2)
+
+    # credit treasury
+    if total_collected > 0:
+        treasury_bal = float(shiftycoin.get(str(TAX_ACCOUNT), 0.0))
+        shiftycoin[str(TAX_ACCOUNT)] = round(treasury_bal + total_collected, 2)
+
+    # persist new balances and update last_collected
+    save_shiftycoin(shiftycoin)
+    info["last_collected"] = _first_of_month(_today_date()).isoformat()
+    info["months_since_last_collection"] = months if months > 0 else 1
+    # append an audit entry for visibility
+    audit = info.get("audit", [])
+    audit_entry = {
+        "collected_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "months_elapsed": months if months > 0 else 1,
+        "total_collected": round(total_collected, 2),
+        "per_user_count": len(per_user)
+    }
+    audit.append(audit_entry)
+    info["audit"] = audit
+    _save_tax_info(info)
+
+    # also print a concise console log (useful when running headless)
+    print(f"[TAX] Collected taxes for {audit_entry['months_elapsed']} month(s): {audit_entry['total_collected']} SC (from {audit_entry['per_user_count']} users)")
+
+    return {"months": months if months > 0 else 1, "total_collected": round(total_collected, 2), "per_user": per_user}
+
+#logging channel stuff
+LOG_CHANNELS_FILE = "log_channels.json"
+
+def _load_log_channels():
+    if os.path.exists(LOG_CHANNELS_FILE):
+        try:
+            with open(LOG_CHANNELS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _save_log_channels(mapping):
+    try:
+        with open(LOG_CHANNELS_FILE, "w") as f:
+            json.dump(mapping, f, indent=2)
+    except Exception:
+        pass
 
 # bot
 bot = commands.Bot(command_prefix=PREFIX, intents=INTENTS, help_command=None)
@@ -455,28 +606,82 @@ async def _on_reaction_event(reaction, user):
 bot.add_listener(_on_reaction_event, 'on_reaction_add')
 bot.add_listener(_on_reaction_event, 'on_reaction_remove')
 
-# moderation logging
-LOG_CHANNEL_NAMES = ("mod-log", "mod_log", "logs", "moderation-log", "moderation", "log")
+# user surveillance
+
+@bot.group(name="srvl", invoke_without_command=True)
+async def srvl(ctx):
+    """Root group for the SRVL system. Use subcommands: channelset, channelrm."""
+    await ctx.send("SRVL commands: `!srvl set` `!srvl rm`")
+
+@srvl.command(name="set")
+async def add_log_channel(ctx, channel: discord.TextChannel = None):
+    """Administrator command: set a channel in this guild to receive SRVL messages."""
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("You do not have permission to use this command.")
+        return
+    if ctx.guild is None:
+        await ctx.send("This command can only be used in a server.")
+        return
+
+    target = channel or ctx.channel
+    if not isinstance(target, discord.TextChannel) or target.guild.id != ctx.guild.id:
+        await ctx.send("Please specify a text channel from this server.")
+        return
+
+    mapping = _load_log_channels()
+    mapping[str(ctx.guild.id)] = str(target.id)
+    _save_log_channels(mapping)
+    await ctx.send(f"SRVL channel for this server set to {target.mention}.")
+
+    @srvl.command(name="rm")
+    async def remove_log_channel(ctx, channel: discord.TextChannel = None):
+        """Administrator command: remove the configured SRVL channel for this guild."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You do not have permission to use this command.")
+            return
+        if ctx.guild is None:
+            await ctx.send("This command can only be used in a server .")
+            return
+
+        mapping = _load_log_channels()
+        gid = str(ctx.guild.id)
+        configured = mapping.get(gid)
+
+        if not configured:
+            await ctx.send("No SRVL channel is configured for this server.")
+            return
+
+        # If a specific channel was provided, ensure it matches the configured one.
+        if channel and str(channel.id) != configured:
+            await ctx.send(f"The configured SRVL channel is <#{configured}>, not {channel.mention}.")
+            return
+
+        mapping.pop(gid, None)
+        _save_log_channels(mapping)
+        await ctx.send("SRVL channel for this server has been removed.")
 
 def _find_log_channel_for_guild(guild: discord.Guild):
-    # try configured channel id first (global config)
-    cid = config.get("log_channel_id")
+
+    # try to return a configured channel
+    mapping = _load_log_channels()
+    gid = str(guild.id)
+    ch = None
+
+    # 1) configured channel id
+    cid = mapping.get(gid)
     if cid:
         try:
-            cid_i = int(cid)
-            ch = bot.get_channel(cid_i)
-            if ch and getattr(ch, "guild", None) == guild:
-                return ch
+            ch = guild.get_channel(int(cid))
         except Exception:
-            pass
-    # fallback: find commonly named channel in the guild
-    for name in LOG_CHANNEL_NAMES:
-        ch = discord.utils.get(guild.text_channels, name=name)
-        if ch:
-            return ch
-    return None
+            ch = None
+        # remove stale mapping if channel not found
+        if not ch and gid in mapping:
+            mapping.pop(gid, None)
+            _save_log_channels(mapping)
 
+    return ch
 
+@bot.event
 async def _send_log_embed(guild: discord.Guild, title: str, description: str, color: discord.Colour = discord.Colour.orange()):
     ch = _find_log_channel_for_guild(guild)
     if not ch:
@@ -490,10 +695,10 @@ async def _send_log_embed(guild: discord.Guild, title: str, description: str, co
 
 @bot.event
 async def on_message_delete(message: discord.Message):
-    # only log guild messages
+    # only log server messages
     if message.guild is None:
         return
-    # ignore if the message was sent by a bot (optional)
+    # ignore if the message was sent by a bot
     if message.author and message.author.bot:
         return
     author = message.author
@@ -517,8 +722,40 @@ async def on_message_delete(message: discord.Message):
     await _send_log_embed(message.guild, "Message Deleted", desc, discord.Colour.red())
 
 @bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    # only log guild messages
+    if before.guild is None:
+        return
+    # ignore if the message was sent by a bot 
+    if before.author and before.author.bot:
+        return
+    author = before.author
+    channel = before.channel
+    content_before = before.content or ""
+    content_after = after.content or ""
+    # include attachments if present
+    files_info = ""
+    if before.attachments:
+        urls = [a.url for a in before.attachments]
+        files_info = "\nAttachments:\n" + "\n".join(urls)
+    # truncate long content for embed
+    if len(content_before) > 1500:
+        content_before = content_before[:1500] + "… (truncated)"
+    if len(content_after) > 1500:
+        content_after = content_after[:1500] + "… (truncated)"
+    desc = (
+        f"Message edited in {channel.mention}\n"
+        f"Author: {author.mention} (`{author.id}`)\n"
+        f"Message ID: `{before.id}`\n\n"
+        f"Before:\n{content_before}"
+        f"\nAfter:\n{content_after}"
+        f"{files_info}"
+    )
+    await _send_log_embed(before.guild, "Message Edited", desc, discord.Colour.orange())
+
+@bot.event
 async def on_member_ban(guild: discord.Guild, user: discord.User):
-    # try to pull reason from audit logs (best-effort)
+    # try to pull reason from audit logs (trying to at least)
     reason = None
     try:
         async for entry in guild.audit_logs(limit=6, action=discord.AuditLogAction.ban):
@@ -570,6 +807,17 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             f"Role removed: {muted_before.name}\n"
         )
         await _send_log_embed(after.guild, "Member Unmuted", desc, discord.Colour.green())
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # detect nickname changes
+    if before.nick != after.nick:
+        desc = (
+            f"User nickname changed: {after.mention} (`{after.id}`)\n"
+            f"Before: {before.nick}\n"
+            f"After: {after.nick}\n"
+        )
+        await _send_log_embed(after.guild, "Member Nickname Changed", desc, discord.Colour.blue())
 
 @bot.group(name="sc", invoke_without_command=True)
 async def sc(ctx):
@@ -921,6 +1169,49 @@ async def bj_stop(ctx):
     await ctx.send("Your game was stopped and removed.")
 '''
 
+#collect taxes
+@bot.command(name="collecttax")
+async def _collecttax(ctx, mode: str = None):
+        # parse force argument
+        force = False
+        if mode:
+            if isinstance(mode, str) and mode.lower() in ("force", "true", "1"):
+                if ctx.author.guild_permissions.administrator:
+                    force = True
+        summary = collect_taxes(force=force)
+        months = summary.get("months", 0)
+        total = summary.get("total_collected", 0.0)
+        per_user = summary.get("per_user", {})
+        if months == 0 and total == 0.0:
+            await ctx.send("No tax collection performed: taxes are already up to date for this month.")
+            return
+        # build a short response
+        lines = [f"Collected taxes for {months} month(s). Total collected: **{total} SC**."]
+        # show up to 8 users for brevity
+        shown = 0
+        for uid, amt in sorted(per_user.items(), key=lambda kv: -kv[1]):
+            if shown >= 8:
+                break
+            lines.append(f"<@{uid}>: **{amt} SC**")
+            shown += 1
+        if len(per_user) > shown:
+            lines.append(f"...and {len(per_user) - shown} more users taxed.")
+        await ctx.send("\n".join(lines))
+
+@bot.command(name="irsbal")
+async def taxbal(ctx):
+    """Show the IRS balance."""
+    shiftycoin = load_shiftycoin()
+    bal = shiftycoin.get(str(TAX_ACCOUNT))
+    if bal is None:
+        await ctx.send(f"Account ({TAX_ACCOUNT}) not found.")
+        return
+    try:
+        bal_f = float(bal)
+    except Exception:
+        bal_f = 0.0
+    await ctx.send(f"({TAX_ACCOUNT}) balance: **{bal_f:.2f} SC**")
+
 @bot.group(name="user", invoke_without_command=True)
 async def user(ctx):
     """Root command for user management functions. Use subcommands: !user kick, !user ban, !user unban, !user mute, !user unmute."""
@@ -1017,6 +1308,9 @@ async def directory(ctx):
         "`!user unban <user id>` - unban a user from the server\n"
         "`!user mute <@user> <duration in minutes>` - mute a user for a duration\n"
         "`!user unmute <@user>` - unmute a user\n\n"
+        "**SRVL Commands**\n"
+        "`!usrvl set <channel>` - set the SRVL channel for this server\n"
+        "`!usrvl rm` - remove the configured SRVL channel for this server\n\n"
         "**Reactions with ⭐ increases recieving user's Shiftycoin balance by 10.** \n"
         "**Reactions with 💀 decreases recieving user's Shiftycoin balance by 20.**"
 
