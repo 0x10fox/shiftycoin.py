@@ -5,11 +5,14 @@ import discord
 import json
 from discord.ext import commands
 import datetime
+import uuid
+import time
 
 
 # config
 config = json.load(open('config.json'))
 TOKEN = os.getenv("DISCORD_TOKEN", config.get("token"))
+OID = os.getenv("OWNER_ID", config.get("owner_id"))
 PREFIX = "!"
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
@@ -345,6 +348,111 @@ def accrue_interest_all():
             months_applied, interest = accrue_interest_for_user(int(uid))
             results[uid] = {"months": months_applied, "interest": interest}
     return results
+
+#business logic
+
+BUSINESSES_FILE = "businesses.json"
+
+def load_businesses():
+    if os.path.exists(BUSINESSES_FILE):
+        try:
+            with open(BUSINESSES_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_businesses(data):
+    try:
+        with open(BUSINESSES_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+def _normalize_name(name: str) -> str:
+    return name.strip()
+
+def create_business(owner_id, name: str, initial_deposit: float = 0.0, grant_balance: float = 0.0):
+    """Create a new business. Main bank stored in shiftycoin under account_key, rest in businesses.json."""
+    name = _normalize_name(name)
+    if not name:
+        raise ValueError("Business name cannot be empty.")
+    businesses = load_businesses()
+    # ensure unique name (case-insensitive)
+    for b in businesses.values():
+        if b.get("name", "").lower() == name.lower():
+            raise ValueError("A business with that name already exists.")
+    bid = str(uuid.uuid4())
+    account_key = f"business:{bid}"
+    rec = {
+        "id": bid,
+        "name": name,
+        "owner": int(owner_id),
+        "account_key": account_key,
+        "grant_balance": round(float(grant_balance), 2),
+        "created_at": datetime.datetime.utcnow().isoformat() + "Z"
+    }
+    businesses[bid] = rec
+    save_businesses(businesses)
+    # initialize main business bank in shiftycoin file
+    if initial_deposit != 0.0:
+        add_balance(account_key, round(initial_deposit, 2))
+    else:
+        # ensure account exists with 0.0
+        add_balance(account_key, 0.0)
+    return rec
+
+def find_business(identifier: str):
+    """Find business by id or name (case-insensitive). Returns (business_record, business_id) or (None, None)."""
+    if not identifier:
+        return None, None
+    businesses = load_businesses()
+    # direct id match
+    if identifier in businesses:
+        return businesses[identifier], identifier
+    # match by name
+    for bid, rec in businesses.items():
+        if rec.get("name", "").lower() == identifier.lower():
+            return rec, bid
+    return None, None
+
+def get_business_info(identifier: str):
+    rec, bid = find_business(identifier)
+    if not rec:
+        return None
+    shiftycoin = load_shiftycoin()
+    acct = rec.get("account_key")
+    main_balance = round(float(shiftycoin.get(str(acct), 0.0)), 2)
+    grant_balance = round(float(rec.get("grant_balance", 0.0)), 2)
+    info = {
+        "id": rec.get("id"),
+        "name": rec.get("name"),
+        "owner": rec.get("owner"),
+        "account_key": acct,
+        "main_balance": main_balance,
+        "grant_balance": grant_balance,
+        "created_at": rec.get("created_at")
+    }
+    return info
+
+def pay_from_business(identifier: str, payer_id: int, to_user_id, amount: float):
+    """Attempt to pay amount from business main bank to a user. Returns new main balance."""
+    if amount <= 0:
+        raise ValueError("Amount must be positive.")
+    rec, bid = find_business(identifier)
+    if not rec:
+        raise ValueError("Business not found.")
+    acct = rec.get("account_key")
+    shiftycoin = load_shiftycoin()
+    bal = float(shiftycoin.get(str(acct), 0.0))
+    if bal < amount:
+        raise ValueError("Business has insufficient funds.")
+    # perform transfer: subtract from business main bank, add to user
+    add_balance(acct, -round(amount, 2))
+    add_balance(to_user_id, round(amount, 2))
+    # return new balance
+    shiftycoin = load_shiftycoin()
+    return round(float(shiftycoin.get(str(acct), 0.0)), 2)
 
 
 # track blackjack games per user (by user id)
@@ -1169,20 +1277,195 @@ async def bj_stop(ctx):
     await ctx.send("Your game was stopped and removed.")
 '''
 
-#collect taxes
+@bot.group(name="corp", invoke_without_command=True)
+async def corp(ctx):
+    await ctx.send("Corporation commands: `!corp start <name>` `!corp pay <corp> <@user> <amount>` `!corp info <corp>`")
 
-@bot.group(name="tax", invoke_without_command=True)
-async def tax(ctx):
-    """Root command for tax management. Use subcommands: collect, brackets, centralbal."""
-    await ctx.send("Tax commands: `!tax collect` `!tax brackets` `!tax centralbal`")
+@corp.command(name="start")
+async def corp_start(ctx, *, name: str):
+    try:
+        rec = create_business(ctx.author.id, name)
+        await ctx.send(
+            f"Business created: **{rec['name']}** (ID: `{rec['id']}`)\n"
+            f"Owner: {ctx.author.mention}\n"
+            f"Main account key: `{rec['account_key']}`\n"
+            f"Bank balance: **0.00 SC**\n"
+            f"Grant balance: **{rec['grant_balance']:.2f} SC**"
+        )
+    except Exception as e:
+        await ctx.send(f"Failed to create business: {e}")
 
-@tax.command(name="collect")
+@corp.command(name="pay")
+async def corp_pay(ctx, identifier: str, member: discord.Member, amount: float):
+    # find business
+    rec, bid = find_business(identifier)
+    if not rec:
+        await ctx.send("Business not found (use id or exact name).")
+        return
+    # permission: only business owner, server admin, or global owner may pay
+    allowed = (ctx.author.id == int(rec.get("owner")) or ctx.author.guild_permissions.administrator or ctx.author.id == OID)
+    if not allowed:
+        await ctx.send("You do not have permission to pay from this business.")
+        return
+    try:
+        amount = round(float(amount), 2)
+        new_bal = pay_from_business(bid, ctx.author.id, member.id, amount)
+        await ctx.send(f"Paid **{amount:.2f} SC** from **{rec['name']}** to {member.mention}.\nNew shiftycoin balance: **{new_bal:.2f} SC**")
+    except Exception as e:
+        await ctx.send(f"Payment failed: {e}")
+
+@corp.command(name="info")
+async def corp_info(ctx, identifier: str):
+    info = get_business_info(identifier)
+    if not info:
+        await ctx.send("Business not found (use id or exact name).")
+        return
+    owner = bot.get_user(int(info["owner"]))
+    owner_display = owner.mention if owner else f"`{info['owner']}`"
+    await ctx.send(
+        f"Business: **{info['name']}** (ID: `{info['id']}`)\n"
+        f"Owner: {owner_display}\n"
+        f"Bank balance: **{info['main_balance']:.2f} SC**\n"
+        f"Grant balance: **{info['grant_balance']:.2f} SC**\n"
+        f"Created: {info.get('created_at')}"
+    )
+
+@corp.command(name="grantpay")
+async def corp_grantpay(ctx, identifier: str, recipient: str, amount: float):
+    """Pay from a business' grant balance to a user or another business."""
+    try:
+        amount = round(float(amount), 2)
+    except Exception:
+        await ctx.send("Invalid amount.")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be positive.")
+        return
+
+    # find payer business
+    rec, bid = find_business(identifier)
+    if not rec:
+        await ctx.send("Payer business not found (use id or exact name).")
+        return
+
+    # permission check (owner, server admin, or global owner)
+    allowed = (ctx.author.id == int(rec.get("owner")) or ctx.author.guild_permissions.administrator or str(ctx.author.id) == str(OID))
+    if not allowed:
+        await ctx.send("You do not have permission to use this business' grant funds.")
+        return
+
+    # ensure sufficient grant balance
+    businesses = load_businesses()
+    payer = businesses.get(bid)
+    if not payer:
+        await ctx.send("Business record missing while processing.")
+        return
+    payer_grant = round(float(payer.get("grant_balance", 0.0)), 2)
+    if payer_grant < amount:
+        await ctx.send(f"Insufficient grant funds. Available: **{payer_grant:.2f} SC**")
+        return
+
+    # try recipient as business first
+    target_rec, target_bid = find_business(recipient)
+    if target_rec:
+        # transfer between business grants
+        businesses[bid]["grant_balance"] = round(payer_grant - amount, 2)
+        businesses[target_bid]["grant_balance"] = round(float(businesses[target_bid].get("grant_balance", 0.0)) + amount, 2)
+        save_businesses(businesses)
+        await ctx.send(
+            f"Transferred **{amount:.2f} SC** from grant of **{rec['name']}** to grant of **{target_rec['name']}**.\n"
+            f"{rec['name']} grant: **{businesses[bid]['grant_balance']:.2f} SC** | "
+            f"{target_rec['name']} grant: **{businesses[target_bid]['grant_balance']:.2f} SC**"
+        )
+        return
+
+    # otherwise try to resolve recipient as a user id/mention/name
+    uid = None
+    # strip mention chars if present
+    stripped = "".join(ch for ch in recipient if ch.isdigit())
+    if stripped:
+        try:
+            uid = int(stripped)
+        except Exception:
+            uid = None
+
+    # if still no uid and in guild, try to look up by name/nick
+    if uid is None and ctx.guild:
+        member = discord.utils.find(lambda m: m.name == recipient or (m.nick and m.nick == recipient), ctx.guild.members)
+        if member:
+            uid = member.id
+
+    if uid is None:
+        # as a last resort try bot.get_user by raw string (may be id)
+        try:
+            possible = int(recipient)
+            uid = possible
+        except Exception:
+            uid = None
+
+    if uid is None:
+        await ctx.send("Could not resolve recipient as a business or user (use business id/name or @user).")
+        return
+
+    # perform transfer: subtract from grant, add to user balance
+    businesses[bid]["grant_balance"] = round(payer_grant - amount, 2)
+    save_businesses(businesses)
+    new_bal = add_balance(uid, amount)
+    await ctx.send(
+        f"Transferred **{amount:.2f} SC** from grant of **{rec['name']}** to <@{uid}>.\n"
+        f"{rec['name']} grant remaining: **{businesses[bid]['grant_balance']:.2f} SC**\n"
+        f"Recipient new balance: **{new_bal:.2f} SC**"
+    )
+
+@corp.command(name="deposit")
+async def corp_deposit(ctx, identifier: str, amount: float):
+    """Deposit SC from your personal balance into a business account."""
+    try:
+        amount = round(float(amount), 2)
+    except Exception:
+        await ctx.send("Invalid amount.")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be positive.")
+        return
+
+    sender_id = ctx.author.id
+    sender_bal = get_balance(sender_id)
+    if sender_bal < amount:
+        await ctx.send("Insufficient Shiftycoin balance.")
+        return
+
+    rec, bid = find_business(identifier)
+    if not rec:
+        await ctx.send("Business not found (use id or exact name).")
+        return
+
+    acct = rec.get("account_key")
+    # perform transfer
+    add_balance(sender_id, -amount)
+    new_acct_bal = add_balance(acct, amount)
+    new_sender_bal = get_balance(sender_id)
+
+    await ctx.send(
+        f"{ctx.author.mention} deposited **{amount:.2f} SC** into **{rec['name']}**.\n"
+        f"Your new balance: **{new_sender_bal:.2f} SC**\n"
+        f"Business balance: **{new_acct_bal:.2f} SC**"
+    )
+
+#bureau commands
+
+@bot.group(name="bureau", invoke_without_command=True)
+async def bureau(ctx):
+    """Root command for Bureau of Shiftycoin Administration interface commands. Use subcommands: collect, brackets, centralbal, grant."""
+    await ctx.send("Bureau of Shiftycoin Administration commands: `!bureau collect` `!bureau brackets` `!bureau centralbal` `!bureau grant`")
+
+@bureau.command(name="collect")
 async def _collecttax(ctx, mode: str = None):
         # parse force argument
         force = False
         if mode:
             if isinstance(mode, str) and mode.lower() in ("force", "true", "1"):
-                if ctx.author.guild_permissions.administrator:
+                if ctx.author.id == OID:
                     force = True
         summary = collect_taxes(force=force)
         months = summary.get("months", 0)
@@ -1204,7 +1487,7 @@ async def _collecttax(ctx, mode: str = None):
             lines.append(f"...and {len(per_user) - shown} more users taxed.")
         await ctx.send("\n".join(lines))
 
-@tax.command(name="centralbal")
+@bureau.command(name="centralbal")
 async def taxbal(ctx):
     """Show the central balance."""
     shiftycoin = load_shiftycoin()
@@ -1218,7 +1501,7 @@ async def taxbal(ctx):
         bal_f = 0.0
     await ctx.send(f"({TAX_ACCOUNT}) balance: **{bal_f:.2f} SC**")
 
-@tax.command(name="brackets")
+@bureau.command(name="brackets")
 async def tax_brackets(ctx):
     """Show configured tax brackets and rates."""
     lines = [
@@ -1235,6 +1518,52 @@ async def tax_brackets(ctx):
         "≤ 1,000 SC -> 0%"
     ]
     await ctx.send("\n".join(lines))
+
+@bureau.command(name="grant")
+async def bureau_grant(ctx, identifier: str, amount: float):
+    """OID-only: move SC from TAX_ACCOUNT into a business' grant balance."""
+    # only allow the configured owner to run this
+    if str(ctx.author.id) != str(OID):
+        await ctx.send("You do not have permission to use this command.")
+        return
+
+    try:
+        amount = round(float(amount), 2)
+    except Exception:
+        await ctx.send("Invalid amount.")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be positive.")
+        return
+
+    rec, bid = find_business(identifier)
+    if not rec:
+        await ctx.send("Business not found (use id or exact name).")
+        return
+
+    # ensure TAX_ACCOUNT has enough funds
+    #shiftycoin = load_shiftycoin()
+    #tax_bal = float(shiftycoin.get(str(TAX_ACCOUNT), 0.0))
+    #if tax_bal < amount:
+    #    await ctx.send(f"Treasury ({TAX_ACCOUNT}) has insufficient funds. Current: **{tax_bal:.2f} SC**")
+    #    return
+
+    # debit treasury and credit business grant_balance
+    add_balance(TAX_ACCOUNT, -amount)
+    # update business grant balance stored in businesses.json
+    businesses = load_businesses()
+    if bid not in businesses:
+        await ctx.send("Business record not found while updating.")
+        return
+    businesses[bid]["grant_balance"] = round(float(businesses[bid].get("grant_balance", 0.0)) + amount, 2)
+    save_businesses(businesses)
+
+    new_tax_bal = round(float(load_shiftycoin().get(str(TAX_ACCOUNT), 0.0)), 2)
+    await ctx.send(
+        f"Transferred **{amount:.2f} SC** from {TAX_ACCOUNT} to business **{rec['name']}** (grant account).\n"
+        f"New {TAX_ACCOUNT} balance: **{new_tax_bal:.2f} SC**\n"
+        f"Business grant balance: **{businesses[bid]['grant_balance']:.2f} SC**"
+    )
 
 @bot.group(name="user", invoke_without_command=True)
 async def user(ctx):
@@ -1326,6 +1655,12 @@ async def directory(ctx):
         "`!loan repay <amount>` - repay part or all of your loan\n"
         "`!loan info <@user>` - show your or another user's loan info\n"
         "`!loan accrue` - apply interest to your loans (admins can apply to all)\n\n"
+        "**Business Commands**\n"
+        "`!corp start <name>` - create a new business\n"
+        "`!corp pay <business/@user> <amount>` - pay a user from a business account\n"
+        "`!corp deposit <business> <amount>` - deposit from your balance into a business account\n"
+        "`!corp info <business>` - show info about a business\n"
+        "`!corp grantpay <business/@user> <recipient> <amount>` - pay from a business grant to a user or another business\n\n"
         "**User Management Commands**\n"
         "`!user kick <@user>` - kick a user from the server\n"
         "`!user ban <@user>` - ban a user from the server\n"
@@ -1333,11 +1668,11 @@ async def directory(ctx):
         "`!user mute <@user> <duration in minutes>` - mute a user for a duration\n"
         "`!user unmute <@user>` - unmute a user\n\n"
         "**SRVL Commands**\n"
-        "`!usrvl set <channel>` - set the SRVL channel for this server\n"
-        "`!usrvl rm` - remove the configured SRVL channel for this server\n\n"
-        "**Tax Commands**\n"
-        "`!tax brackets` - show the configured tax brackets and rates\n"
-        "`!tax centralbal` - show the balance of the central tax collection account\n\n"
+        "`!srvl set <channel>` - set the SRVL channel for this server\n"
+        "`!srvl rm` - remove the configured SRVL channel for this server\n\n"
+        "**Bureau of Shiftycoin Administration Commands**\n"
+        "`!bureau brackets` - show the configured tax brackets and rates\n"
+        "`!bureau centralbal` - show the balance of the central tax collection account\n\n"
         "**Reactions with ⭐ increases recieving user's Shiftycoin balance by 10.** \n"
         "**Reactions with 💀 decreases recieving user's Shiftycoin balance by 20.**"
 
