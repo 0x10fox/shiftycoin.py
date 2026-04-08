@@ -1170,7 +1170,13 @@ async def bj_stop(ctx):
 '''
 
 #collect taxes
-@bot.command(name="collecttax")
+
+@bot.group(name="tax", invoke_without_command=True)
+async def tax(ctx):
+    """Root command for tax management. Use subcommands: collect, brackets, centralbal."""
+    await ctx.send("Tax commands: `!tax collect` `!tax brackets` `!tax centralbal`")
+
+@tax.command(name="collect")
 async def _collecttax(ctx, mode: str = None):
         # parse force argument
         force = False
@@ -1198,9 +1204,9 @@ async def _collecttax(ctx, mode: str = None):
             lines.append(f"...and {len(per_user) - shown} more users taxed.")
         await ctx.send("\n".join(lines))
 
-@bot.command(name="irsbal")
+@tax.command(name="centralbal")
 async def taxbal(ctx):
-    """Show the IRS balance."""
+    """Show the central balance."""
     shiftycoin = load_shiftycoin()
     bal = shiftycoin.get(str(TAX_ACCOUNT))
     if bal is None:
@@ -1211,6 +1217,24 @@ async def taxbal(ctx):
     except Exception:
         bal_f = 0.0
     await ctx.send(f"({TAX_ACCOUNT}) balance: **{bal_f:.2f} SC**")
+
+@tax.command(name="brackets")
+async def tax_brackets(ctx):
+    """Show configured tax brackets and rates."""
+    lines = [
+        "Configured tax brackets (balance -> tax rate):",
+        "≥ 1,000,000,000 SC -> 99%",
+        "> 100,000,000 SC -> 80%",
+        "> 10,000,000 SC -> 65%",
+        "> 1,000,000 SC -> 40%",
+        "> 500,000 SC -> 30%",
+        "> 100,000 SC -> 20%",
+        "> 50,000 SC -> 10%",
+        "> 10,000 SC -> 5%",
+        "> 1,000 SC -> 3%",
+        "≤ 1,000 SC -> 0%"
+    ]
+    await ctx.send("\n".join(lines))
 
 @bot.group(name="user", invoke_without_command=True)
 async def user(ctx):
@@ -1311,6 +1335,9 @@ async def directory(ctx):
         "**SRVL Commands**\n"
         "`!usrvl set <channel>` - set the SRVL channel for this server\n"
         "`!usrvl rm` - remove the configured SRVL channel for this server\n\n"
+        "**Tax Commands**\n"
+        "`!tax brackets` - show the configured tax brackets and rates\n"
+        "`!tax centralbal` - show the balance of the central tax collection account\n\n"
         "**Reactions with ⭐ increases recieving user's Shiftycoin balance by 10.** \n"
         "**Reactions with 💀 decreases recieving user's Shiftycoin balance by 20.**"
 
