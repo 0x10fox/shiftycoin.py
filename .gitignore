@@ -5,3 +5,4 @@ log_channels.json
 tax_info.json
 businesses.json
 payrolls.json
+.vscode/launch.json

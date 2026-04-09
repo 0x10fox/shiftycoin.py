@@ -17,6 +17,25 @@ PREFIX = "!"
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
 
+
+# track bot start time for uptime reporting
+BOT_START = time.time()
+
+def _format_duration(seconds: float) -> str:
+    td = datetime.timedelta(seconds=int(seconds))
+    days = td.days
+    hours, rem = divmod(td.seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
+
 # deck, scoring
 RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 SUITS = ["♠", "♥", "♦", "♣"]
@@ -621,6 +640,94 @@ async def on_ready():
     # status
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.playing, name=config.get("status")))
 
+# reaction handlers for joining/refunding bets
+async def _handle_bet_reaction_add(reaction, user):
+    if user.bot:
+        return
+    mid = reaction.message.id
+    if mid not in BETS:
+        return
+    if str(reaction.emoji) not in BET_EMOJIS:
+        return
+    b = BETS[mid]
+    if b.get("resolved"):
+        # no longer accepting entries
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception:
+            pass
+        return
+
+    option_index = 0 if str(reaction.emoji) == BET_EMOJIS[0] else 1
+    uid = str(user.id)
+
+    # already entered?
+    if uid in b["entries"]:
+        # if they already chose same option, ignore; if different, do not allow switching directly
+        if b["entries"][uid] == option_index:
+            return
+        # remove the new reaction and inform
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception:
+            pass
+        try:
+            await user.send("You already have an active entry on this bet. Remove your existing reaction first to change your choice.")
+        except Exception:
+            pass
+        return
+
+    # check balance and charge
+    bal = get_balance(uid)
+    if float(bal) < float(b["amount"]):
+        # cannot join, remove reaction and notify
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception:
+            pass
+        try:
+            await user.send(f"Insufficient Shiftycoin to join this bet (requires {b['amount']:.2f} SC).")
+        except Exception:
+            pass
+        return
+
+    # charge and record
+    add_balance(uid, -round(b["amount"], 2))
+    b["entries"][uid] = option_index
+    try:
+        await user.send(f"You joined the bet ({b['options'][option_index]}) for {b['amount']:.2f} SC.")
+    except Exception:
+        pass
+
+async def _handle_bet_reaction_remove(reaction, user):
+    if user.bot:
+        return
+    mid = reaction.message.id
+    if mid not in BETS:
+        return
+    if str(reaction.emoji) not in BET_EMOJIS:
+        return
+    b = BETS[mid]
+    if b.get("resolved"):
+        return
+    option_index = 0 if str(reaction.emoji) == BET_EMOJIS[0] else 1
+    uid = str(user.id)
+    if uid not in b["entries"]:
+        return
+    if b["entries"].get(uid) != option_index:
+        return
+    # remove entry and refund
+    b["entries"].pop(uid, None)
+    add_balance(uid, round(b["amount"], 2))
+    try:
+        await user.send(f"Your bet entry was cancelled and {b['amount']:.2f} SC was refunded.")
+    except Exception:
+        pass
+
+# hook up the listeners (separate from reward handlers)
+bot.add_listener(_handle_bet_reaction_add, 'on_reaction_add')
+bot.add_listener(_handle_bet_reaction_remove, 'on_reaction_remove')
+
 '''
 # process incoming reactions
 @bot.event
@@ -1193,6 +1300,174 @@ async def sc_loan_accrue(ctx):
     else:
         new_rec = get_loan_record(uid)
         await ctx.send(f"Accrued interest for {months} month(s): **{interest} SC**. New loan balance: **{new_rec['balance']} SC**")
+
+# betting system (create bets resolved by a 3rd-party arbiter)
+
+BETS = {}  # message_id -> bet record
+
+BET_EMOJIS = ("1️⃣", "2️⃣")
+
+@bot.group(name="bet", invoke_without_command=True)
+async def bet(ctx):
+    await ctx.send("Bet commands: `!bet create \"<option A> | <option B>\" <amount> <@arbiter>` `!bet resolve <message_id> <1|2>` `!bet status <message_id>`")
+
+@bet.command(name="create")
+async def bet_create(ctx, options: str, amount: float, arbiter: discord.Member):
+    """
+    Create a two-option bet. options must contain a single '|' separating the two choices.
+    Example: !bet create "Option A | Option B" 50 @arbiter
+    Each participant pays <amount> SC when they react. The specified arbiter resolves the bet.
+    """
+    try:
+        amount = round(float(amount), 2)
+    except Exception:
+        await ctx.send("Invalid amount.")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be positive.")
+        return
+    if arbiter.bot:
+        await ctx.send("Arbiter must be a real user (not a bot).")
+        return
+
+    if "|" not in options:
+        await ctx.send("Options must be two choices separated by `|`.")
+        return
+    left, right = [o.strip() for o in options.split("|", 1)]
+    if not left or not right:
+        await ctx.send("Both options must be non-empty.")
+        return
+
+    # post bet message and add reactions
+    desc = (
+        f"Bet created by {ctx.author.mention}\n\n"
+        f"1️⃣ {left}\n"
+        f"2️⃣ {right}\n\n"
+        f"Amount per entry: **{amount:.2f} SC**\n"
+        f"Arbiter: {arbiter.mention}\n\n"
+        "React with 1️⃣ or 2️⃣ to join. Remove your reaction to cancel your entry.\n"
+        "The arbiter resolves the bet with `!bet resolve <bet_id> <1|2>`."
+    )
+    msg = await ctx.send(desc)
+
+    #edit message to include its own ID for easier reference
+    try:
+        await msg.edit(content=desc + f"\n\nBet ID: `{msg.id}`")
+    except Exception:
+        pass
+
+    # add the two reactions for users
+    try:
+        await msg.add_reaction(BET_EMOJIS[0])
+        await msg.add_reaction(BET_EMOJIS[1])
+    except Exception:
+        pass
+
+    BETS[msg.id] = {
+        "creator": ctx.author.id,
+        "options": [left, right],
+        "amount": amount,
+        "arbiter": arbiter.id,
+        "entries": {},  # user_id -> option_index (0 or 1)
+        "resolved": False,
+        "message_channel": ctx.channel.id
+    }
+
+@bet.command(name="status")
+async def bet_status(ctx, message_id: int):
+    b = BETS.get(message_id)
+    if not b:
+        await ctx.send("Bet not found.")
+        return
+    counts = [0, 0]
+    for uid, opt in b["entries"].items():
+        counts[opt] += 1
+    opt_text = (
+        f"1️⃣ {b['options'][0]} — {counts[0]} entries\n"
+        f"2️⃣ {b['options'][1]} — {counts[1]} entries\n"
+    )
+    await ctx.send(
+        f"Bet {message_id} status:\n"
+        f"Amount per entry: **{b['amount']:.2f} SC**\n"
+        f"Arbiter: <@{b['arbiter']}>\n"
+        f"{opt_text}"
+    )
+
+@bet.command(name="resolve")
+async def bet_resolve(ctx, message_id: int, winning: int):
+    """
+    Arbiter resolves a bet. winning should be 1 or 2.
+    Payout: total pool (amount * total entries) is divided equally among winners.
+    Winners receive their payout (they were charged entry amount on joining).
+    If no winners, all entries are refunded.
+    """
+    b = BETS.get(message_id)
+    if not b:
+        await ctx.send("Bet not found.")
+        return
+    if b.get("resolved"):
+        await ctx.send("Bet already resolved.")
+        return
+    if ctx.author.id != int(b["arbiter"]) and ctx.author.id != int(OID):
+        await ctx.send("Only the assigned arbiter (or owner) may resolve this bet.")
+        return
+    if winning not in (1, 2):
+        await ctx.send("Winning option must be 1 or 2.")
+        return
+
+    entries = b["entries"]
+    total_entries = len(entries)
+    amount = float(b["amount"])
+    total_pool = round(amount * total_entries, 2)
+
+    winners = [int(uid) for uid, opt in entries.items() if opt == (winning - 1)]
+    losers = [int(uid) for uid, opt in entries.items() if opt != (winning - 1)]
+
+    if total_entries == 0:
+        b["resolved"] = True
+        await ctx.send("No entries in this bet. Nothing to do.")
+        return
+
+    if len(winners) == 0:
+        # refund everyone
+        for uid in entries.keys():
+            add_balance(uid, round(amount, 2))
+        b["resolved"] = True
+        await ctx.send(f"No winners — all entries refunded ({total_entries} participants).")
+    else:
+        payout_each = round(total_pool / len(winners), 2)
+        # pay winners
+        for uid in winners:
+            add_balance(uid, payout_each)
+        b["resolved"] = True
+        # Build result message
+        winner_mentions = " ".join(f"<@{w}>" for w in winners)
+        await ctx.send(
+            f"Bet {message_id} resolved by {ctx.author.mention} — winning option: **{winning}** ({b['options'][winning-1]}).\n"
+            f"Total pool: **{total_pool:.2f} SC** | Winners: {len(winners)} | Each receives: **{payout_each:.2f} SC**\n"
+            f"Winners: {winner_mentions}"
+        )
+
+    # try to edit original message to show resolved state (best-effort)
+    try:
+        ch = bot.get_channel(int(b["message_channel"]))
+        if ch:
+            try:
+                orig = await ch.fetch_message(message_id)
+                new_text = orig.content + f"\n\nRESOLVED: winning option {winning} ({b['options'][winning-1]})"
+                await orig.edit(content=new_text)
+                # remove reactions to close the bet
+                for e in BET_EMOJIS:
+                    try:
+                        await orig.clear_reactions()
+                        break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 
 @bot.group(name="bj", invoke_without_command=True)
@@ -1946,44 +2221,113 @@ async def unban(ctx, user: discord.User):
     except Exception as e:
         await ctx.send(f"Failed to unban {user.mention}. Error: {e}")
 
-@bot.command(name="directory")
+@bot.command(name="ping")
+async def ping(ctx):
+    """HELLO ARE YOU AWAKE SIR?"""
+    ws_latency_ms = round((bot.latency or 0.0) * 1000)
+    await ctx.send(f"dong. socket latency: {ws_latency_ms} ms")
+
+@bot.command(name="uptime")
+async def uptime(ctx):
+    """Show how long the bot has been running."""
+    elapsed = time.time() - BOT_START
+    await ctx.send(f"uptime: { _format_duration(elapsed) }")
+
+@bot.group(name="dir", invoke_without_command=True)
+async def dir(ctx):
+    """Root directory. Use subcommands: !dir sc, !dir loan, !dir corp, !dir bj, !dir bet, !dir user, !dir bureau, !dir srvl"""
+    await ctx.send(
+        "**Root directory**\n\n"
+        "`!dir sc` - Shiftycoin commands\n"
+        "`!dir loan` - Loan system commands\n"
+        "`!dir corp` - Business/corporation commands\n"
+        "`!dir bj` - Blackjack game commands\n"
+        "`!dir bet` - Betting system commands\n"
+        "`!dir user` - User management commands\n"
+        "`!dir bureau` - Bureau of Shiftycoin Administration commands\n"
+        "`!dir srvl` - SRVL commands\n\n"
+        "**Reactions with ⭐ increases recieving user's Shiftycoin balance by 10.** \n"
+        "**Reactions with 💀 decreases recieving user's Shiftycoin balance by 20.**"
+                   )
+
+@dir.command(name="sc")
+async def directory(ctx):
+    await ctx.send(
+        "**Shiftycoin Commands**\n"
+        "`!sc bal` - show your balance\n"
+        "`!sc send <@user> <amount>` - send shiftycoin to another user\n"
+        "`!sc request <@user> <amount>` - request shiftycoin from another user\n"
+    )
+
+@dir.command(name="loan")
+async def directory(ctx):
+    await ctx.send(
+        "**Loan System Commands**\n"
+        "`!loan take <amount>` - take out a loan\n"
+        "`!loan repay <amount>` - repay part or all of your loan\n"
+        "`!loan info <@user>` - show your or another user's loan info\n"
+        "`!loan accrue` - apply interest to your loans (admins can apply to all)\n"
+    )
+
+@dir.command(name="corp")
+async def directory(ctx):
+    await ctx.send(
+        "**Business Commands**\n"
+        "`!corp start <name>` - create a new business\n"
+        "`!corp pay <business> <business/@user> <amount>` - pay a user from a business account\n"
+        "`!corp deposit <business> <amount>` - deposit from your balance into a business account\n"
+        "`!corp info <business>` - show info about a business\n"
+        "`!corp grantpay <business> <recipient> <amount>` - pay from a business grant to a user or another business\n"
+        "*Payroll System Commands*\n"
+        "`!corp payroll add <business> <recipient> <amount> <bank|grant>` - add a daily payroll entry\n"
+        "`!corp payroll rm <payroll_id>` - remove a payroll entry\n"
+        "`!corp payroll list [business]` - list payroll entries, optionally filtered to a business \n"
+    )
+
+@dir.command(name="bj")
 async def directory(ctx):
     await ctx.send(
         "**Blackjack Commands**\n"
         "`!bj start <bet (optional)>` - start a new game (default bet is semi random)\n"
         "`!bj hit` - draw a card\n"
         "`!bj stand` - end your turn, dealer plays\n"
-        "`!bj hand` - show current hand\n\n"
-        "**Shiftycoin Commands**\n"
-        "`!sc bal` - show your balance\n"
-        "`!sc send <@user> <amount>` - send shiftycoin to another user\n"
-        "`!sc request <@user> <amount>` - request shiftycoin from another user\n\n"
-        "**Loan Commands**\n"
-        "`!loan take <amount>` - take out a loan\n"
-        "`!loan repay <amount>` - repay part or all of your loan\n"
-        "`!loan info <@user>` - show your or another user's loan info\n"
-        "`!loan accrue` - apply interest to your loans (admins can apply to all)\n\n"
-        "**Business Commands**\n"
-        "`!corp start <name>` - create a new business\n"
-        "`!corp pay <business> <business/@user> <amount>` - pay a user from a business account\n"
-        "`!corp deposit <business> <amount>` - deposit from your balance into a business account\n"
-        "`!corp info <business>` - show info about a business\n"
-        "`!corp grantpay <business> <recipient> <amount>` - pay from a business grant to a user or another business\n\n"
+        "`!bj hand` - show current hand\n"
+    )
+
+@dir.command(name="bet")
+async def directory(ctx):
+    await ctx.send(
+        "**Betting Commands**\n"
+        "`!bet create \"<option A> | <option B>\" <amount> <@arbiter>` - create a new bet\n"
+        "`!bet resolve <bet_id> <1|2>` - resolve a bet\n"
+        "`!bet status <bet_id>` - show the status of a bet\n"
+    )
+
+@dir.command(name="user")
+async def directory(ctx):
+    await ctx.send(
         "**User Management Commands**\n"
         "`!user kick <@user>` - kick a user from the server\n"
         "`!user ban <@user>` - ban a user from the server\n"
         "`!user unban <user id>` - unban a user from the server\n"
         "`!user mute <@user> <duration in minutes>` - mute a user for a duration\n"
-        "`!user unmute <@user>` - unmute a user\n\n"
-        "**SRVL Commands**\n"
-        "`!srvl set <channel>` - set the SRVL channel for this server\n"
-        "`!srvl rm` - remove the configured SRVL channel for this server\n\n"
+        "`!user unmute <@user>` - unmute a user\n"
+    )
+
+@dir.command(name="bureau")
+async def directory(ctx):
+    await ctx.send(
         "**Bureau of Shiftycoin Administration Commands**\n"
         "`!bureau brackets` - show the configured tax brackets and rates\n"
-        "`!bureau centralbal` - show the balance of the central tax collection account\n\n"
-        "**Reactions with ⭐ increases recieving user's Shiftycoin balance by 10.** \n"
-        "**Reactions with 💀 decreases recieving user's Shiftycoin balance by 20.**"
+        "`!bureau centralbal` - show the balance of the central tax collection account\n"
+    )
 
+@dir.command(name="srvl")
+async def directory(ctx):
+    await ctx.send(
+        "**SRVL Commands**\n"
+        "`!srvl set <channel>` - set the SRVL channel for this server\n"
+        "`!srvl rm` - remove the configured SRVL channel for this server\n"
     )
 
 bot.run(TOKEN)
