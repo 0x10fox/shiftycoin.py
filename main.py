@@ -15,6 +15,8 @@ TOKEN = os.getenv("DISCORD_TOKEN", config.get("token"))
 OID = os.getenv("OWNER_ID", config.get("owner_id"))
 PREFIX = "!"
 INTENTS = discord.Intents.default()
+# Ensure we receive reaction events and message content updates
+INTENTS.reactions = True
 INTENTS.message_content = True
 
 
@@ -640,33 +642,78 @@ async def on_ready():
     # status
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.playing, name=config.get("status")))
 
-# reaction handlers for joining/refunding bets
-async def _handle_bet_reaction_add(reaction, user):
+# bet file mgmt
+BETS_FILE = "bets.json"
+
+def load_bets():
+    """Load bets from JSON file. Return dict keyed by int(message_id)."""
+    if os.path.exists(BETS_FILE):
+        try:
+            with open(BETS_FILE, "r") as f:
+                raw = json.load(f)
+        except Exception:
+            return {}
+        out = {}
+        for k, v in raw.items():
+            try:
+                mid = int(k)
+            except Exception:
+                continue
+            out[mid] = v
+        return out
+    return {}
+
+def save_bets(bets: dict):
+    """Save bets dict (keys int) to JSON file (keys as strings)."""
+    try:
+        serial = {str(k): v for k, v in bets.items()}
+        with open(BETS_FILE, "w") as f:
+            json.dump(serial, f, indent=2)
+    except Exception:
+        pass
+
+# initialize global in-memory BETS from file
+BETS = load_bets()
+
+# reaction handlers for joining/refunding bets (persist changes to bets.json)
+async def _multi_handle_bet_reaction_add(reaction, user):
     if user.bot:
         return
     mid = reaction.message.id
-    if mid not in BETS:
+    bets = load_bets()
+    if mid not in bets:
         return
-    if str(reaction.emoji) not in BET_EMOJIS:
+    b = bets[mid]
+    emoji = str(reaction.emoji)
+    if emoji not in BET_EMOJIS:
         return
-    b = BETS[mid]
     if b.get("resolved"):
-        # no longer accepting entries
         try:
             await reaction.message.remove_reaction(reaction.emoji, user)
         except Exception:
             pass
         return
 
-    option_index = 0 if str(reaction.emoji) == BET_EMOJIS[0] else 1
+    try:
+        option_index = BET_EMOJIS.index(emoji)
+    except ValueError:
+        return
+
+    # ignore reactions for options beyond what the bet declared
+    if option_index >= len(b.get("options", [])):
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception:
+            pass
+        return
+
     uid = str(user.id)
 
     # already entered?
     if uid in b["entries"]:
-        # if they already chose same option, ignore; if different, do not allow switching directly
         if b["entries"][uid] == option_index:
             return
-        # remove the new reaction and inform
+        # do not allow switching without removing previous reaction
         try:
             await reaction.message.remove_reaction(reaction.emoji, user)
         except Exception:
@@ -680,7 +727,6 @@ async def _handle_bet_reaction_add(reaction, user):
     # check balance and charge
     bal = get_balance(uid)
     if float(bal) < float(b["amount"]):
-        # cannot join, remove reaction and notify
         try:
             await reaction.message.remove_reaction(reaction.emoji, user)
         except Exception:
@@ -691,43 +737,53 @@ async def _handle_bet_reaction_add(reaction, user):
             pass
         return
 
-    # charge and record
+    # charge and record (persist)
     add_balance(uid, -round(b["amount"], 2))
     b["entries"][uid] = option_index
+    bets[mid] = b
+    save_bets(bets)
+    global BETS
+    BETS = bets
     try:
         await user.send(f"You joined the bet ({b['options'][option_index]}) for {b['amount']:.2f} SC.")
     except Exception:
         pass
 
-async def _handle_bet_reaction_remove(reaction, user):
+async def _multi_handle_bet_reaction_remove(reaction, user):
     if user.bot:
         return
     mid = reaction.message.id
-    if mid not in BETS:
+    bets = load_bets()
+    if mid not in bets:
         return
-    if str(reaction.emoji) not in BET_EMOJIS:
+    b = bets[mid]
+    emoji = str(reaction.emoji)
+    if emoji not in BET_EMOJIS:
         return
-    b = BETS[mid]
     if b.get("resolved"):
         return
-    option_index = 0 if str(reaction.emoji) == BET_EMOJIS[0] else 1
+
+    try:
+        option_index = BET_EMOJIS.index(emoji)
+    except ValueError:
+        return
+
     uid = str(user.id)
     if uid not in b["entries"]:
         return
     if b["entries"].get(uid) != option_index:
         return
-    # remove entry and refund
+    # remove entry, refund and persist
     b["entries"].pop(uid, None)
     add_balance(uid, round(b["amount"], 2))
+    bets[mid] = b
+    save_bets(bets)
+    global BETS
+    BETS = bets
     try:
         await user.send(f"Your bet entry was cancelled and {b['amount']:.2f} SC was refunded.")
     except Exception:
         pass
-
-# hook up the listeners (separate from reward handlers)
-bot.add_listener(_handle_bet_reaction_add, 'on_reaction_add')
-bot.add_listener(_handle_bet_reaction_remove, 'on_reaction_remove')
-
 '''
 # process incoming reactions
 @bot.event
@@ -1305,18 +1361,21 @@ async def sc_loan_accrue(ctx):
 
 BETS = {}  # message_id -> bet record
 
-BET_EMOJIS = ("1️⃣", "2️⃣")
+BET_EMOJIS = ("1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣")
 
 @bot.group(name="bet", invoke_without_command=True)
 async def bet(ctx):
-    await ctx.send("Bet commands: `!bet create \"<option A> | <option B>\" <amount> <@arbiter>` `!bet resolve <message_id> <1|2>` `!bet status <message_id>`")
+    await ctx.send("Bet commands: `!bet create \"Opt A | Opt B | Opt C\" 10 @arbiter [description...]` `!bet resolve <message_id> <1|2>` `!bet leave <message_id>` `!bet cancel <message_id>` `!bet status <message_id>`")
+
+bot.add_listener(_multi_handle_bet_reaction_add, 'on_reaction_add')
+bot.add_listener(_multi_handle_bet_reaction_remove, 'on_reaction_remove')
+
 
 @bet.command(name="create")
-async def bet_create(ctx, options: str, amount: float, arbiter: discord.Member):
+async def bet_create(ctx, options: str, amount: float, arbiter: discord.Member, *, description: str = ""):
     """
-    Create a two-option bet. options must contain a single '|' separating the two choices.
-    Example: !bet create "Option A | Option B" 50 @arbiter
-    Each participant pays <amount> SC when they react. The specified arbiter resolves the bet.
+    Create a bet with 2..9 options and an optional description.
+    Usage: !bet create "Opt A | Opt B | Opt C" 10 @arbiter [description...]
     """
     try:
         amount = round(float(amount), 2)
@@ -1331,77 +1390,95 @@ async def bet_create(ctx, options: str, amount: float, arbiter: discord.Member):
         return
 
     if "|" not in options:
-        await ctx.send("Options must be two choices separated by `|`.")
+        await ctx.send("Options must be separated by `|` (e.g. `Opt A | Opt B`).")
         return
-    left, right = [o.strip() for o in options.split("|", 1)]
-    if not left or not right:
-        await ctx.send("Both options must be non-empty.")
+    opts = [o.strip() for o in options.split("|") if o.strip()]
+    if len(opts) < 2:
+        await ctx.send("Provide at least 2 options.")
+        return
+    if len(opts) > len(BET_EMOJIS):
+        await ctx.send(f"Maximum {len(BET_EMOJIS)} options are supported.")
         return
 
-    # post bet message and add reactions
-    desc = (
-        f"Bet created by {ctx.author.mention}\n\n"
-        f"1️⃣ {left}\n"
-        f"2️⃣ {right}\n\n"
-        f"Amount per entry: **{amount:.2f} SC**\n"
-        f"Arbiter: {arbiter.mention}\n\n"
-        "React with 1️⃣ or 2️⃣ to join. Remove your reaction to cancel your entry.\n"
-        "The arbiter resolves the bet with `!bet resolve <bet_id> <1|2>`."
-    )
+    # prepare message
+    lines = [f"Bet created by {ctx.author.mention}", ""]
+    if description:
+        lines.append(description)
+        lines.append("")
+    for idx, o in enumerate(opts, start=1):
+        lines.append(f"{BET_EMOJIS[idx-1]} {o}")
+    lines.append("")
+    lines.append(f"Amount per entry: **{amount:.2f} SC**")
+    lines.append(f"Arbiter: {arbiter.mention}")
+    lines.append("")
+    lines.append("React with an option emoji to join. Remove your reaction to cancel your entry.")
+    lines.append("The arbiter resolves the bet with `!bet resolve <bet_id> <option_number>`.")
+    desc = "\n".join(lines)
+
     msg = await ctx.send(desc)
-
-    #edit message to include its own ID for easier reference
+    # include id
     try:
         await msg.edit(content=desc + f"\n\nBet ID: `{msg.id}`")
     except Exception:
         pass
 
-    # add the two reactions for users
-    try:
-        await msg.add_reaction(BET_EMOJIS[0])
-        await msg.add_reaction(BET_EMOJIS[1])
-    except Exception:
-        pass
+    # add option reactions
+    for i in range(len(opts)):
+        try:
+            await msg.add_reaction(BET_EMOJIS[i])
+        except Exception:
+            pass
 
-    BETS[msg.id] = {
+    bets = load_bets()
+    bets[msg.id] = {
         "creator": ctx.author.id,
-        "options": [left, right],
+        "options": opts,
         "amount": amount,
         "arbiter": arbiter.id,
-        "entries": {},  # user_id -> option_index (0 or 1)
+        "entries": {},  # user_id (str) -> option_index (int)
         "resolved": False,
-        "message_channel": ctx.channel.id
+        "message_channel": ctx.channel.id,
+        "description": description or ""
     }
+    save_bets(bets)
+    # update in-memory global
+    global BETS
+    BETS = bets
 
 @bet.command(name="status")
 async def bet_status(ctx, message_id: int):
-    b = BETS.get(message_id)
+    bets = load_bets()
+    b = bets.get(message_id)
     if not b:
         await ctx.send("Bet not found.")
         return
-    counts = [0, 0]
+    counts = [0] * len(b["options"])
     for uid, opt in b["entries"].items():
-        counts[opt] += 1
-    opt_text = (
-        f"1️⃣ {b['options'][0]} — {counts[0]} entries\n"
-        f"2️⃣ {b['options'][1]} — {counts[1]} entries\n"
-    )
-    await ctx.send(
+        try:
+            if 0 <= int(opt) < len(counts):
+                counts[int(opt)] += 1
+        except Exception:
+            continue
+    opt_lines = []
+    for idx, opt in enumerate(b["options"], start=1):
+        opt_lines.append(f"{idx}. {opt} — {counts[idx-1]} entries ({BET_EMOJIS[idx-1]})")
+    desc = (
         f"Bet {message_id} status:\n"
         f"Amount per entry: **{b['amount']:.2f} SC**\n"
-        f"Arbiter: <@{b['arbiter']}>\n"
-        f"{opt_text}"
+        f"Arbiter: <@{b['arbiter']}>\n\n"
+        + (f"{b.get('description')}\n\n" if b.get("description") else "")
+        + "\n".join(opt_lines)
     )
+    await ctx.send(desc)
 
 @bet.command(name="resolve")
 async def bet_resolve(ctx, message_id: int, winning: int):
     """
-    Arbiter resolves a bet. winning should be 1 or 2.
-    Payout: total pool (amount * total entries) is divided equally among winners.
-    Winners receive their payout (they were charged entry amount on joining).
-    If no winners, all entries are refunded.
+    Arbiter resolves a bet. winning is the 1-based index of the winning option.
+    Payout: total pool divided equally among winners. If no winners, refund all.
     """
-    b = BETS.get(message_id)
+    bets = load_bets()
+    b = bets.get(message_id)
     if not b:
         await ctx.send("Bet not found.")
         return
@@ -1411,36 +1488,48 @@ async def bet_resolve(ctx, message_id: int, winning: int):
     if ctx.author.id != int(b["arbiter"]) and ctx.author.id != int(OID):
         await ctx.send("Only the assigned arbiter (or owner) may resolve this bet.")
         return
-    if winning not in (1, 2):
-        await ctx.send("Winning option must be 1 or 2.")
+    if not (1 <= winning <= len(b["options"])):
+        await ctx.send(f"Winning option must be between 1 and {len(b['options'])}.")
         return
 
-    entries = b["entries"]
+    entries = b["entries"] or {}
     total_entries = len(entries)
     amount = float(b["amount"])
     total_pool = round(amount * total_entries, 2)
 
-    winners = [int(uid) for uid, opt in entries.items() if opt == (winning - 1)]
-    losers = [int(uid) for uid, opt in entries.items() if opt != (winning - 1)]
-
+    winners = [int(uid) for uid, opt in entries.items() if int(opt) == (winning - 1)]
     if total_entries == 0:
         b["resolved"] = True
+        bets[message_id] = b
+        save_bets(bets)
+        global BETS
+        BETS = bets
         await ctx.send("No entries in this bet. Nothing to do.")
         return
 
     if len(winners) == 0:
         # refund everyone
         for uid in entries.keys():
-            add_balance(uid, round(amount, 2))
+            try:
+                add_balance(uid, round(amount, 2))
+            except Exception:
+                pass
         b["resolved"] = True
+        bets[message_id] = b
+        save_bets(bets)
+        BETS = bets
         await ctx.send(f"No winners — all entries refunded ({total_entries} participants).")
     else:
         payout_each = round(total_pool / len(winners), 2)
-        # pay winners
         for uid in winners:
-            add_balance(uid, payout_each)
+            try:
+                add_balance(uid, payout_each)
+            except Exception:
+                pass
         b["resolved"] = True
-        # Build result message
+        bets[message_id] = b
+        save_bets(bets)
+        BETS = bets
         winner_mentions = " ".join(f"<@{w}>" for w in winners)
         await ctx.send(
             f"Bet {message_id} resolved by {ctx.author.mention} — winning option: **{winning}** ({b['options'][winning-1]}).\n"
@@ -1448,7 +1537,7 @@ async def bet_resolve(ctx, message_id: int, winning: int):
             f"Winners: {winner_mentions}"
         )
 
-    # try to edit original message to show resolved state (best-effort)
+    # try to edit original message to show resolved state and remove reactions
     try:
         ch = bot.get_channel(int(b["message_channel"]))
         if ch:
@@ -1456,19 +1545,135 @@ async def bet_resolve(ctx, message_id: int, winning: int):
                 orig = await ch.fetch_message(message_id)
                 new_text = orig.content + f"\n\nRESOLVED: winning option {winning} ({b['options'][winning-1]})"
                 await orig.edit(content=new_text)
-                # remove reactions to close the bet
-                for e in BET_EMOJIS:
+                try:
+                    await orig.clear_reactions()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+@bet.command(name="cancel")
+async def bet_cancel(ctx, message_id: int, *, reason: str = ""):
+    """
+    Cancel a bet. Only the bet creator, the arbiter, or the configured owner may cancel.
+    Refunds all active entries and marks the bet resolved/cancelled.
+    """
+    bets = load_bets()
+    b = bets.get(message_id)
+    if not b:
+        await ctx.send("Bet not found.")
+        return
+    if b.get("resolved"):
+        await ctx.send("Bet already resolved or cancelled.")
+        return
+
+    # permission: creator, arbiter, or global owner
+    creator_id = int(b.get("creator"))
+    arbiter_id = int(b.get("arbiter"))
+    try:
+        owner_id = int(OID)
+    except Exception:
+        owner_id = OID
+
+    allowed = ctx.author.id in (creator_id, arbiter_id) or str(ctx.author.id) == str(owner_id)
+    if not allowed:
+        await ctx.send("Only the bet creator, the arbiter, or the owner may cancel this bet.")
+        return
+
+    # refund all entries
+    entries = b.get("entries", {}) or {}
+    amount = round(float(b.get("amount", 0.0)), 2)
+    refunded_count = 0
+    if entries:
+        for uid in list(entries.keys()):
+            try:
+                add_balance(uid, amount)
+                refunded_count += 1
+            except Exception:
+                pass
+
+    b["resolved"] = True
+    b["cancelled_by"] = ctx.author.id
+    b["cancel_reason"] = reason or ""
+    bets[message_id] = b
+    save_bets(bets)
+    global BETS
+    BETS = bets
+
+    # try to edit the original message to indicate cancellation and clear reactions
+    try:
+        ch = bot.get_channel(int(b.get("message_channel")))
+        if ch:
+            try:
+                orig = await ch.fetch_message(message_id)
+                new_text = orig.content + f"\n\nCANCELLED by {ctx.author.mention}"
+                if reason:
+                    new_text += f": {reason}"
+                await orig.edit(content=new_text)
+                try:
+                    await orig.clear_reactions()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    await ctx.send(f"Bet {message_id} cancelled. Refunded {refunded_count} entr{'y' if refunded_count==1 else 'ies'}.")
+
+@bet.command(name="leave")
+async def bet_leave(ctx, message_id: int):
+    """Remove your selection from a bet and refund your entry fee."""
+    bets = load_bets()
+    b = bets.get(message_id)
+    if not b:
+        await ctx.send("Bet not found.")
+        return
+    if b.get("resolved"):
+        await ctx.send("This bet has already been resolved; you cannot leave now.")
+        return
+
+    uid = str(ctx.author.id)
+    entries = b.get("entries", {}) or {}
+    if uid not in entries:
+        await ctx.send("You do not have an active entry on this bet.")
+        return
+
+    try:
+        opt_index = int(entries.pop(uid))
+    except Exception:
+        opt_index = None
+
+    # refund the user's stake
+    amount = round(float(b.get("amount", 0.0)), 2)
+    add_balance(ctx.author.id, amount)
+
+    # persist changes
+    b["entries"] = entries
+    bets[message_id] = b
+    save_bets(bets)
+    global BETS
+    BETS = bets
+
+    await ctx.send(f"{ctx.author.mention}, your entry was removed and {amount:.2f} SC has been refunded to you.")
+
+    # attempt to remove the user's reaction from the original message for cleanliness
+    try:
+        ch = bot.get_channel(int(b.get("message_channel")))
+        if ch:
+            try:
+                orig = await ch.fetch_message(message_id)
+                if opt_index is not None and 0 <= opt_index < len(BET_EMOJIS):
                     try:
-                        await orig.clear_reactions()
-                        break
+                        await orig.remove_reaction(BET_EMOJIS[opt_index], ctx.author)
                     except Exception:
                         pass
             except Exception:
                 pass
     except Exception:
         pass
-
-
 
 @bot.group(name="bj", invoke_without_command=True)
 async def bj(ctx):
@@ -2300,6 +2505,8 @@ async def directory(ctx):
         "**Betting Commands**\n"
         "`!bet create \"<option A> | <option B>\" <amount> <@arbiter>` - create a new bet\n"
         "`!bet resolve <bet_id> <1|2>` - resolve a bet\n"
+        "`!bet leave <bet_id>` - leave a bet\n"
+        "`!bet cancel <bet_id>` - cancel a bet\n"
         "`!bet status <bet_id>` - show the status of a bet\n"
     )
 
