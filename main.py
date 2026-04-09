@@ -672,11 +672,86 @@ def save_bets(bets: dict):
     except Exception:
         pass
 
+async def check_message_reactions(channel: discord.abc.Messageable, message_id: int) -> dict:
+    """
+    Fetch the message and return a summary of current reactions.
+
+    Returns a dict:
+        {
+    "message_id": int,
+    "author_id": int|None,
+    "reactions": { "<emoji>": count, ... },
+    "reaction_users": { "<emoji>": [user_id, ...], ... },   # non-bot users who reacted
+    "reward_count": int,
+    "penalty_count": int,
+    "reward_units": int,   # reward_count // REACTIONS_PER_SC
+    "penalty_units": int,  # penalty_count // REACTIONS_PER_SC
+    "reward_user_ids": [int, ...],   # non-bot users who reacted with REWARD_EMOTE
+    "penalty_user_ids": [int, ...]   # non-bot users who reacted with PENALTY_EMOTE
+        }
+
+    Raises the original exception if the message cannot be fetched.
+    """
+    # fetch message from channel (allow exception to propagate)
+    msg = await channel.fetch_message(message_id)
+
+    reactions = {}
+    reaction_users = {}
+    reward_count = 0
+    penalty_count = 0
+    reward_user_ids = []
+    penalty_user_ids = []
+
+    # Iterate all reactions and collect non-bot user ids for each emoji
+    for r in msg.reactions:
+        emoji_str = str(r.emoji)
+        reactions[emoji_str] = r.count
+
+        users_list = []
+        try:
+            async for u in r.users():
+                # skip bots
+                if getattr(u, "bot", False):
+                    continue
+                uid = getattr(u, "id", None)
+                if uid is not None:
+                    users_list.append(uid)
+        except Exception:
+            # best-effort: if iteration fails, leave users_list empty for this reaction
+            users_list = []
+
+        # store per-emoji non-bot user ids
+        reaction_users[emoji_str] = users_list
+
+        if emoji_str == REWARD_EMOTE:
+            reward_count = r.count
+            reward_user_ids = users_list.copy()
+        elif emoji_str == PENALTY_EMOTE:
+            penalty_count = r.count
+            penalty_user_ids = users_list.copy()
+
+    reward_units = reward_count // REACTIONS_PER_SC
+    penalty_units = penalty_count // REACTIONS_PER_SC
+
+    return {
+        "message_id": msg.id,
+        "author_id": getattr(msg.author, "id", None),
+        "reactions": reactions,
+        "reaction_users": reaction_users,
+        "reward_count": reward_count,
+        "penalty_count": penalty_count,
+        "reward_units": reward_units,
+        "penalty_units": penalty_units,
+        "reward_user_ids": reward_user_ids,
+        "penalty_user_ids": penalty_user_ids
+    }
+
 # initialize global in-memory BETS from file
 BETS = load_bets()
 
 # reaction handlers for joining/refunding bets (persist changes to bets.json)
 async def _multi_handle_bet_reaction_add(reaction, user):
+    #print("reaction add", reaction.emoji, reaction.message.id, user.id)
     if user.bot:
         return
     mid = reaction.message.id
@@ -750,6 +825,7 @@ async def _multi_handle_bet_reaction_add(reaction, user):
         pass
 
 async def _multi_handle_bet_reaction_remove(reaction, user):
+    #print("reaction remove", reaction.emoji, reaction.message.id, user.id)
     if user.bot:
         return
     mid = reaction.message.id
@@ -1491,6 +1567,94 @@ async def bet_resolve(ctx, message_id: int, winning: int):
     if not (1 <= winning <= len(b["options"])):
         await ctx.send(f"Winning option must be between 1 and {len(b['options'])}.")
         return
+    global BETS
+    # Reconcile on-message reactions into the bet entries before resolving.
+    try:
+        # try to find the original channel to inspect reactions; fallback to ctx.channel
+        ch = None
+        try:
+            ch = bot.get_channel(int(b.get("message_channel")))
+        except Exception:
+            ch = None
+        if ch is None:
+            ch = ctx.channel
+
+        summary = await check_message_reactions(ch, message_id)
+        reaction_users = summary.get("reaction_users", {}) or {}
+        print("Reaction users summary:", reaction_users)
+        # build mapping emoji -> list(user_id)
+        new_entries_map = {}
+        for emoji, users in reaction_users.items():
+            if emoji not in BET_EMOJIS:
+                continue
+            try:
+                opt_idx = BET_EMOJIS.index(emoji)
+            except ValueError:
+                continue
+            # ignore options outside declared range
+            if opt_idx >= len(b.get("options", [])):
+                continue
+            for uid in users or []:
+                if uid is None:
+                    continue
+                new_entries_map[str(uid)] = opt_idx
+
+        # reconcile with stored entries: refund removed, charge newly reacted
+        stored = b.get("entries", {}) or {}
+        stake = round(float(b.get("amount", 0.0)), 2)
+
+        # refund users who no longer reacted
+        for uid in list(stored.keys()):
+            if uid not in new_entries_map:
+                try:
+                    add_balance(uid, stake)
+                except Exception:
+                    pass
+                stored.pop(uid, None)
+
+        # add or switch entries based on reactions
+        for uid, opt_idx in new_entries_map.items():
+            if uid in stored:
+                # user switched option -> just update
+                if stored.get(uid) != opt_idx:
+                    stored[uid] = opt_idx
+                continue
+
+            # new entrant: verify balance and charge
+            try:
+                bal = float(get_balance(uid))
+            except Exception:
+                bal = 0.0
+            if bal < stake:
+                # if user lacks funds, attempt to remove their reaction for cleanliness
+                try:
+                    orig = await ch.fetch_message(message_id)
+                    if 0 <= opt_idx < len(BET_EMOJIS):
+                        try:
+                            user_obj = bot.get_user(int(uid))
+                            await orig.remove_reaction(BET_EMOJIS[opt_idx], user_obj or discord.Object(int(uid)))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                continue
+
+            # charge and record entry
+            try:
+                add_balance(uid, -stake)
+                stored[uid] = opt_idx
+            except Exception:
+                pass
+
+        # persist any changes
+        b["entries"] = stored
+        bets[message_id] = b
+        save_bets(bets)
+        global BETS
+        BETS = bets
+    except Exception:
+        # best-effort only; do not block resolve on sync failures
+        pass
 
     entries = b["entries"] or {}
     total_entries = len(entries)
@@ -1502,7 +1666,6 @@ async def bet_resolve(ctx, message_id: int, winning: int):
         b["resolved"] = True
         bets[message_id] = b
         save_bets(bets)
-        global BETS
         BETS = bets
         await ctx.send("No entries in this bet. Nothing to do.")
         return
@@ -2503,7 +2666,7 @@ async def directory(ctx):
 async def directory(ctx):
     await ctx.send(
         "**Betting Commands**\n"
-        "`!bet create \"<option A> | <option B>\" <amount> <@arbiter>` - create a new bet\n"
+        "`!bet create \"Opt A | Opt B | Opt C\" 10 @arbiter [description...]` - create a new bet\n"
         "`!bet resolve <bet_id> <1|2>` - resolve a bet\n"
         "`!bet leave <bet_id>` - leave a bet\n"
         "`!bet cancel <bet_id>` - cancel a bet\n"
