@@ -7,3 +7,16 @@ businesses.json
 payrolls.json
 .vscode/launch.json
 bets.json
+main.py.bak
+__pycache__/main.cpython-313.pyc
+__pycache__/utils.cpython-313.pyc
+cogs/__pycache__/__init__.cpython-313.pyc
+cogs/__pycache__/betting.cpython-313.pyc
+cogs/__pycache__/blackjack.cpython-313.pyc
+cogs/__pycache__/bureau.cpython-313.pyc
+cogs/__pycache__/corp.cpython-313.pyc
+cogs/__pycache__/directory.cpython-313.pyc
+cogs/__pycache__/loans.cpython-313.pyc
+cogs/__pycache__/sc.cpython-313.pyc
+cogs/__pycache__/srvl.cpython-313.pyc
+cogs/__pycache__/user.cpython-313.pyc
