@@ -31,7 +31,8 @@ class DirectoryCog(commands.Cog, name="Directory"):
             "`!dir bet` - Betting system commands\n"
             "`!dir user` - User management commands\n"
             "`!dir bureau` - Bureau of Shiftycoin Administration commands\n"
-            "`!dir srvl` - SRVL commands\n\n"
+            "`!dir srvl` - SRVL commands\n"
+            "`!dir api` - API management commands\n\n"
             "**Reactions with ⭐ increases recieving user's Shiftycoin balance by 10.** \n"
             "**Reactions with 💀 decreases recieving user's Shiftycoin balance by 20.**"
         )
@@ -116,6 +117,15 @@ class DirectoryCog(commands.Cog, name="Directory"):
             "**SRVL Commands**\n"
             "`!srvl set <channel>` - set the SRVL channel for this server\n"
             "`!srvl rm` - remove the configured SRVL channel for this server\n"
+        )
+
+    @dir.command(name="api")
+    async def directory_api(self, ctx):
+        await ctx.send(
+            "**API Management Commands**\n"
+            "`!api token` - generate a new API token and DM it to you\n"
+            "`!api revoke` - remove your existing API token\n"
+            "`!api status` - check whether you have an active API token and when it expires"
         )
 
 

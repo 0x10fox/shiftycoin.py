@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 from utils import (
     get_balance, add_balance, load_shiftycoin, mass_redistribute_shiftycoin,
-    REWARD_EMOTE, PENALTY_EMOTE, REACTIONS_PER_SC
+    REWARD_EMOTE, PENALTY_EMOTE, REACTIONS_PER_SC, OID
 )
 from cogs.converters import MemberOrUser
 
@@ -171,7 +171,7 @@ class ShiftycoinCog(commands.Cog, name="Shiftycoin"):
 
     @sc.command(name="redistribute")
     async def redistribute(self, ctx):
-        if not ctx.author.guild_permissions.administrator:
+        if str(ctx.author.id) != str(OID):
             await ctx.send("You do not have permission to use this command.")
             return
         new_balances = mass_redistribute_shiftycoin()

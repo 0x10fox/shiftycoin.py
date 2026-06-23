@@ -4,6 +4,7 @@ import json
 import datetime
 import uuid
 import time
+import secrets
 
 # config
 config = json.load(open('config.json'))
@@ -746,3 +747,156 @@ async def _process_payrolls():
 
     save_payrolls(payrolls)
     return {"processed": processed, "skipped": skipped}
+
+
+# API token management
+USER_TOKENS_FILE = "user_tokens.json"
+TOKEN_TTL_HOURS = 24 * 365  # 1 year
+
+
+def load_user_tokens():
+    if os.path.exists(USER_TOKENS_FILE):
+        try:
+            with open(USER_TOKENS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_user_tokens(data):
+    try:
+        with open(USER_TOKENS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def create_user_token(discord_id: str, ttl_hours: int = TOKEN_TTL_HOURS):
+    """Generate a new API token for a Discord user. Revokes any existing token first."""
+    tokens = load_user_tokens()
+    # remove any existing token for this user
+    tokens = {t: d for t, d in tokens.items() if str(d.get("discord_id")) != str(discord_id)}
+    token = secrets.token_urlsafe(32)
+    now = datetime.datetime.utcnow()
+    expires_at = now + datetime.timedelta(hours=ttl_hours)
+    tokens[token] = {
+        "discord_id": str(discord_id),
+        "created_at": now.isoformat() + "Z",
+        "expires_at": expires_at.isoformat() + "Z",
+    }
+    save_user_tokens(tokens)
+    return token, expires_at.isoformat() + "Z"
+
+
+def validate_token(token: str):
+    """Return the discord_id string if the token is valid and not expired, else None."""
+    tokens = load_user_tokens()
+    entry = tokens.get(token)
+    if not entry:
+        return None
+    try:
+        expires_at = datetime.datetime.fromisoformat(entry["expires_at"].rstrip("Z"))
+        if datetime.datetime.utcnow() > expires_at:
+            return None
+    except Exception:
+        return None
+    return str(entry["discord_id"])
+
+
+def revoke_user_token(discord_id: str) -> bool:
+    """Revoke the token for a Discord user. Returns True if a token was found and removed."""
+    tokens = load_user_tokens()
+    pruned = {t: d for t, d in tokens.items() if str(d.get("discord_id")) != str(discord_id)}
+    if len(pruned) == len(tokens):
+        return False
+    save_user_tokens(pruned)
+    return True
+
+
+def get_token_info(discord_id: str):
+    """Return token metadata for a user (not the token itself), or None if no token exists."""
+    tokens = load_user_tokens()
+    for data in tokens.values():
+        if str(data.get("discord_id")) == str(discord_id):
+            try:
+                expires_at = datetime.datetime.fromisoformat(data["expires_at"].rstrip("Z"))
+                expired = datetime.datetime.utcnow() > expires_at
+            except Exception:
+                expired = True
+            return {
+                "created_at": data.get("created_at"),
+                "expires_at": data.get("expires_at"),
+                "expired": expired,
+            }
+    return None
+
+
+# API app-key management
+API_KEYS_FILE = "api_keys.json"
+
+
+def load_api_keys():
+    if os.path.exists(API_KEYS_FILE):
+        try:
+            with open(API_KEYS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_api_keys(data):
+    try:
+        with open(API_KEYS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def create_api_key(name: str):
+    """Create a named app key. Names must be unique. Returns (key, record)."""
+    name = name.strip()
+    if not name:
+        raise ValueError("Key name cannot be empty.")
+    keys = load_api_keys()
+    for rec in keys.values():
+        if rec.get("name", "").lower() == name.lower():
+            raise ValueError(f'An app key named "{name}" already exists.')
+    key = secrets.token_urlsafe(32)
+    record = {
+        "name": name,
+        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    keys[key] = record
+    save_api_keys(keys)
+    return key, record
+
+
+def validate_api_key(key: str):
+    """Return the key record if the key exists, else None."""
+    return load_api_keys().get(key)
+
+
+def revoke_api_key(name: str) -> bool:
+    """Revoke an app key by name. Returns True if a key was found and removed."""
+    keys = load_api_keys()
+    target = next((k for k, v in keys.items() if v.get("name", "").lower() == name.lower()), None)
+    if target is None:
+        return False
+    del keys[target]
+    save_api_keys(keys)
+    return True
+
+
+def list_api_keys() -> list:
+    """Return summary records (name, created_at, key_preview) for all app keys."""
+    keys = load_api_keys()
+    return [
+        {
+            "name": rec["name"],
+            "created_at": rec["created_at"],
+            "key_preview": key[:8] + "...",
+        }
+        for key, rec in keys.items()
+    ]

@@ -21,3 +21,8 @@ cogs/__pycache__/sc.cpython-313.pyc
 cogs/__pycache__/srvl.cpython-313.pyc
 cogs/__pycache__/user.cpython-313.pyc
 cogs/__pycache__/converters.cpython-313.pyc
+cogs/__pycache__/api.cpython-313.pyc
+.gitignore
+user_tokens.json
+api_keys.json
+__pycache__/api_server.cpython-313.pyc
