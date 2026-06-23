@@ -5,6 +5,7 @@ from utils import (
     accrue_interest_for_user, accrue_interest_all, get_balance, add_balance,
     BASE_LOAN_RATE
 )
+from cogs.converters import MemberOrUser
 
 
 class LoanCog(commands.Cog, name="Loans"):
@@ -56,7 +57,7 @@ class LoanCog(commands.Cog, name="Loans"):
             await ctx.send(f"Repayment failed: {e}")
 
     @sc_loan.command(name="info")
-    async def sc_loan_info(self, ctx, member: discord.Member = None):
+    async def sc_loan_info(self, ctx, member: MemberOrUser = None):
         target = member or ctx.author
         rec = get_loan_record(target.id)
         last = rec.get("last_accrued") or "never"

@@ -1,6 +1,7 @@
 import asyncio
 import discord
 from discord.ext import commands
+from cogs.converters import MemberOrUser
 
 
 class UserCog(commands.Cog, name="User"):
@@ -24,7 +25,7 @@ class UserCog(commands.Cog, name="User"):
             await ctx.send(f"Failed to kick {member.mention}. Error: {e}")
 
     @user.command(name="ban")
-    async def ban(self, ctx, member: discord.Member, *, reason=None):
+    async def ban(self, ctx, member: MemberOrUser, *, reason=None):
         if not ctx.author.guild_permissions.ban_members:
             await ctx.send("You do not have permission to ban members.")
             return

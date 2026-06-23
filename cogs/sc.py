@@ -4,6 +4,7 @@ from utils import (
     get_balance, add_balance, load_shiftycoin, mass_redistribute_shiftycoin,
     REWARD_EMOTE, PENALTY_EMOTE, REACTIONS_PER_SC
 )
+from cogs.converters import MemberOrUser
 
 APPLIED_REACTIONS = {}
 
@@ -71,7 +72,7 @@ class ShiftycoinCog(commands.Cog, name="Shiftycoin"):
         await ctx.send("Shiftycoin commands: `!sc bal` `!sc send` `!sc request`")
 
     @sc.command(name="bal")
-    async def balance(self, ctx, member: discord.Member = None):
+    async def balance(self, ctx, member: MemberOrUser = None):
         """Show your balance or another member's balance."""
         target = member or ctx.author
         bal = get_balance(target.id)
@@ -81,7 +82,7 @@ class ShiftycoinCog(commands.Cog, name="Shiftycoin"):
             await ctx.send(f"{ctx.author.mention}, your balance: **{float(bal):.2f} SC**")
 
     @sc.command(name="send")
-    async def send(self, ctx, member: discord.Member, amount: float):
+    async def send(self, ctx, member: MemberOrUser, amount: float):
         if amount <= 0:
             await ctx.send("Amount must be positive.")
             return
@@ -101,7 +102,7 @@ class ShiftycoinCog(commands.Cog, name="Shiftycoin"):
         )
 
     @sc.command(name="request")
-    async def request_sc(self, ctx, member: discord.Member, amount: float):
+    async def request_sc(self, ctx, member: MemberOrUser, amount: float):
         if amount <= 0:
             await ctx.send("Amount must be positive.")
             return
