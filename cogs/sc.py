@@ -2,7 +2,8 @@ import discord
 from discord.ext import commands
 from utils import (
     get_balance, add_balance, load_shiftycoin, mass_redistribute_shiftycoin,
-    REWARD_EMOTE, PENALTY_EMOTE, REACTIONS_PER_SC, OID
+    REWARD_EMOTE, PENALTY_EMOTE, REACTIONS_PER_SC, OID,
+    log_transaction, get_transaction, get_transactions_for_user,
 )
 from cogs.converters import MemberOrUser
 
@@ -39,9 +40,19 @@ class ShiftycoinCog(commands.Cog, name="Shiftycoin"):
         delta_penalty = penalty_units - prev_penalty
 
         if delta_reward != 0:
-            add_balance(message.author.id, delta_reward * 10)
+            sc_delta = delta_reward * 10
+            add_balance(message.author.id, sc_delta)
+            if sc_delta > 0:
+                log_transaction("reaction_reward", "system:reactions", str(message.author.id), sc_delta, {"message_id": mid})
+            else:
+                log_transaction("reaction_reward_removed", str(message.author.id), "system:reactions", -abs(sc_delta), {"message_id": mid})
         if delta_penalty != 0:
-            add_balance(message.author.id, delta_penalty * -20)
+            sc_delta = delta_penalty * -20
+            add_balance(message.author.id, sc_delta)
+            if sc_delta < 0:
+                log_transaction("reaction_penalty", str(message.author.id), "system:reactions", -abs(sc_delta), {"message_id": mid})
+            else:
+                log_transaction("reaction_penalty_removed", "system:reactions", str(message.author.id), sc_delta, {"message_id": mid})
 
         APPLIED_REACTIONS[mid]["reward"] = reward_units
         APPLIED_REACTIONS[mid]["penalty"] = penalty_units
@@ -94,6 +105,7 @@ class ShiftycoinCog(commands.Cog, name="Shiftycoin"):
             return
         add_balance(sender_id, -amount)
         new_receiver_bal = add_balance(receiver_id, amount)
+        log_transaction("send", str(sender_id), str(receiver_id), amount)
         new_sender_bal = get_balance(sender_id)
         await ctx.send(
             f"{ctx.author.mention} sent **{amount} SC** to {member.mention}.\n"
@@ -137,6 +149,7 @@ class ShiftycoinCog(commands.Cog, name="Shiftycoin"):
 
                 add_balance(self_.payer_id, -self_.amount)
                 new_receiver_bal = add_balance(self_.requester_id, self_.amount)
+                log_transaction("send", str(self_.payer_id), str(self_.requester_id), self_.amount)
                 self_.paid = True
 
                 button.disabled = True
@@ -180,6 +193,47 @@ class ShiftycoinCog(commands.Cog, name="Shiftycoin"):
             return
         await ctx.send(f"The Great Redistribution has occurred. The playing field has been leveled for all {len(new_balances)} individuals. \n"
                        "**May the users of our Shiftycoin find renewed hope and opportunity in this new era of equality.**")
+
+    @sc.group(name="ledger", invoke_without_command=True)
+    async def sc_ledger(self, ctx, tx_id: str = None):
+        """Look up a transaction by its UUID."""
+        if tx_id is None:
+            await ctx.send("Usage: `!sc ledger <tx_id>` or `!sc ledger user [@user]`")
+            return
+        tx = get_transaction(tx_id)
+        if not tx:
+            await ctx.send(f"Transaction `{tx_id}` not found.")
+            return
+        lines = [
+            f"**Transaction:** `{tx['id']}`",
+            f"**Type:** {tx['type']}",
+            f"**Amount:** {'+' if tx['amount'] >= 0 else ''}{tx['amount']:.2f} SC",
+            f"**From:** `{tx['from_id']}`",
+            f"**To:** `{tx['to_id']}`",
+            f"**Time:** {tx['timestamp']}",
+        ]
+        if tx.get("metadata"):
+            for k, v in tx["metadata"].items():
+                lines.append(f"**{k}:** {v}")
+        await ctx.send("\n".join(lines))
+
+    @sc_ledger.command(name="user")
+    async def sc_ledger_user(self, ctx, member: MemberOrUser = None):
+        """List your recent transactions, or another user's (owner only)."""
+        target = member or ctx.author
+        if target.id != ctx.author.id and str(ctx.author.id) != str(OID):
+            await ctx.send("You can only view your own transactions.")
+            return
+        txs = get_transactions_for_user(str(target.id))
+        if not txs:
+            await ctx.send(f"No transactions found for {target.mention}.")
+            return
+        lines = [
+            f"`{tx['id']}` | **{tx['type']}** | **{'+' if tx['amount'] >= 0 else ''}{tx['amount']:.2f} SC** | {tx['timestamp'][:10]}"
+            for tx in txs[:20]
+        ]
+        header = f"Recent transactions for {target.mention} (up to 20):\n"
+        await ctx.send(header + "\n".join(lines))
 
     @sc.command(name="globalbal")
     async def globalbal(self, ctx):

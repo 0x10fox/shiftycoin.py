@@ -42,6 +42,8 @@ async def main():
         for cog in COGS:
             await bot.load_extension(cog)
 
+        api_app.state.bot = bot
+
         api_config = uvicorn.Config(api_app, host=API_HOST, port=API_PORT, log_level="info")
         api_server = uvicorn.Server(api_config)
         api_server.install_signal_handlers = False  # let discord.py own signal handling

@@ -4,7 +4,8 @@ from discord.ext import commands
 from utils import (
     create_business, find_business, get_business_info, pay_from_business,
     load_businesses, save_businesses, add_balance, get_balance,
-    load_payrolls, save_payrolls, _parse_user_identifier, _process_payrolls
+    load_payrolls, save_payrolls, _parse_user_identifier, _process_payrolls,
+    log_transaction,
 )
 from utils import OID
 
@@ -163,6 +164,7 @@ class CorpCog(commands.Cog, name="Corp"):
                 await ctx.send("Recipient business missing account key.")
                 return
             new_target_main = add_balance(target_acct, amount)
+            log_transaction("grantpay", f"grant:{bid}", str(target_acct), amount, {"payer_business_id": bid, "payer_business_name": rec['name'], "recipient_business_id": target_bid, "recipient_business_name": target_rec['name']})
             payer_new_grant = businesses[bid]["grant_balance"]
             await ctx.send(
                 f"Transferred **{amount:.2f} SC** from grant of **{rec['name']}** to SC account of **{target_rec['name']}**.\n"
@@ -198,6 +200,7 @@ class CorpCog(commands.Cog, name="Corp"):
         businesses[bid]["grant_balance"] = round(payer_grant - amount, 2)
         save_businesses(businesses)
         new_bal = add_balance(uid, amount)
+        log_transaction("grantpay", f"grant:{bid}", str(uid), amount, {"payer_business_id": bid, "payer_business_name": rec['name']})
         await ctx.send(
             f"Transferred **{amount:.2f} SC** from grant of **{rec['name']}** to <@{uid}>.\n"
             f"{rec['name']} grant remaining: **{businesses[bid]['grant_balance']:.2f} SC**\n"
@@ -230,6 +233,7 @@ class CorpCog(commands.Cog, name="Corp"):
         acct = rec.get("account_key")
         add_balance(sender_id, -amount)
         new_acct_bal = add_balance(acct, amount)
+        log_transaction("deposit", str(sender_id), str(acct), -amount, {"business_id": bid, "business_name": rec['name']})
         new_sender_bal = get_balance(sender_id)
 
         await ctx.send(
@@ -240,7 +244,7 @@ class CorpCog(commands.Cog, name="Corp"):
 
     @corp.group(name="payroll", invoke_without_command=True)
     async def corp_payroll(self, ctx):
-        await ctx.send("Payroll commands: `!corp payroll add <business> <@user/id/name> <amount> <bank|grant>` `!corp payroll rm <payroll_id>` `!corp payroll list` `!corp payroll run`")
+        await ctx.send("Payroll commands: `!corp payroll add <business> <@user/id/name> <amount> <bank|grant>` `!corp payroll rm <payroll_id>` `!corp payroll list <payroll_id|business>` `!corp payroll run`")
 
     @corp_payroll.command(name="add")
     async def corp_payroll_add(self, ctx, identifier: str, recipient: str, amount: float, source: str = "bank"):
@@ -311,27 +315,38 @@ class CorpCog(commands.Cog, name="Corp"):
         await ctx.send(f"Payroll `{payroll_id}` removed.")
 
     @corp_payroll.command(name="list")
-    async def corp_payroll_list(self, ctx, identifier: str = None):
-        """List payroll entries. If identifier provided, filter to that business."""
+    async def corp_payroll_list(self, ctx, identifier: str):
+        """Look up a payroll by ID, or list all payrolls for a business by name/ID."""
         payrolls = load_payrolls()
-        lines = []
-        for pid, p in payrolls.items():
-            if identifier:
-                brec, bid = find_business(identifier)
-                if not brec or bid != p.get("business_id"):
-                    continue
-            lines.append(f"{pid} | Business: `{p.get('business_id')}` | Recipient: <@{p.get('recipient_id')}> | Amount: **{p.get('amount'):.2f} SC**/day | Source: {p.get('source')} | Last paid: {p.get('last_paid') or 'never'}")
-        if not lines:
-            await ctx.send("No payrolls found.")
+        p = payrolls.get(identifier)
+        if p:
+            await ctx.send(
+                f"**Payroll** `{p['id']}`\n"
+                f"Business: `{p.get('business_id')}` | Recipient: <@{p.get('recipient_id')}>\n"
+                f"Amount: **{p.get('amount'):.2f} SC**/day | Source: {p.get('source')}\n"
+                f"Last paid: {p.get('last_paid') or 'never'} | Created: {p.get('created_at')}"
+            )
             return
-        chunk = ""
-        for ln in lines:
-            if len(chunk) + len(ln) + 1 > 2000:
+        brec, bid = find_business(identifier)
+        if brec:
+            entries = [p for p in payrolls.values() if p.get("business_id") == bid]
+            if not entries:
+                await ctx.send(f"No payrolls found for **{brec['name']}**.")
+                return
+            lines = [
+                f"`{p['id']}` | Recipient: <@{p.get('recipient_id')}> | **{p.get('amount'):.2f} SC**/day | {p.get('source')} | Last paid: {p.get('last_paid') or 'never'}"
+                for p in entries
+            ]
+            chunk = f"Payrolls for **{brec['name']}**:\n"
+            for ln in lines:
+                if len(chunk) + len(ln) + 1 > 2000:
+                    await ctx.send(chunk)
+                    chunk = ""
+                chunk += ln + "\n"
+            if chunk:
                 await ctx.send(chunk)
-                chunk = ""
-            chunk += ln + "\n"
-        if chunk:
-            await ctx.send(chunk)
+            return
+        await ctx.send(f"No payroll or business found matching `{identifier}`.")
 
     @corp_payroll.command(name="run")
     async def corp_payroll_run(self, ctx, identifier: str = None):

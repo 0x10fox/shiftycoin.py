@@ -26,3 +26,4 @@ cogs/__pycache__/api.cpython-313.pyc
 user_tokens.json
 api_keys.json
 __pycache__/api_server.cpython-313.pyc
+ledger.json

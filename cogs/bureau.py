@@ -1,7 +1,7 @@
 from discord.ext import commands
 from utils import (
     collect_taxes, TAX_ACCOUNT, load_shiftycoin, add_balance,
-    find_business, load_businesses, save_businesses
+    find_business, load_businesses, save_businesses, log_transaction,
 )
 from utils import OID
 
@@ -94,6 +94,7 @@ class BureauCog(commands.Cog, name="Bureau"):
             return
 
         add_balance(TAX_ACCOUNT, -amount)
+        log_transaction("bureau_grant", str(TAX_ACCOUNT), f"grant:{bid}", amount, {"business_id": bid, "business_name": rec['name']})
         businesses = load_businesses()
         if bid not in businesses:
             await ctx.send("Business record not found while updating.")

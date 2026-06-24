@@ -41,9 +41,13 @@ class DirectoryCog(commands.Cog, name="Directory"):
     async def directory_sc(self, ctx):
         await ctx.send(
             "**Shiftycoin Commands**\n"
-            "`!sc bal` - show your balance\n"
-            "`!sc send <@user> <amount>` - send shiftycoin to another user\n"
-            "`!sc request <@user> <amount>` - request shiftycoin from another user\n"
+            "`!sc bal [@user]` — show your balance or another user's\n"
+            "`!sc send <@user> <amount>` — send SC to another user\n"
+            "`!sc request <@user> <amount>` — request SC from another user\n"
+            "`!sc ledger <transaction_id>` — look up a specific transaction by UUID\n"
+            "`!sc ledger user [@user]` — list your recent transactions (or another user's, owner only)\n"
+            "`!sc globalbal` — show all balances and global total\n"
+            "`!sc redistribute` — redistribute all SC equally among all holders (owner only)\n"
         )
 
     @dir.command(name="loan")
@@ -60,15 +64,17 @@ class DirectoryCog(commands.Cog, name="Directory"):
     async def directory_corp(self, ctx):
         await ctx.send(
             "**Business Commands**\n"
-            "`!corp start <name>` - create a new business\n"
-            "`!corp pay <business> <business/@user> <amount>` - pay a user from a business account\n"
-            "`!corp deposit <business> <amount>` - deposit from your balance into a business account\n"
-            "`!corp info <business>` - show info about a business\n"
-            "`!corp grantpay <business> <recipient> <amount>` - pay from a business grant to a user or another business\n"
-            "*Payroll System Commands*\n"
-            "`!corp payroll add <business> <recipient> <amount> <bank|grant>` - add a daily payroll entry\n"
-            "`!corp payroll rm <payroll_id>` - remove a payroll entry\n"
-            "`!corp payroll list [business]` - list payroll entries, optionally filtered to a business \n"
+            "`!corp start <name>` — create a new business\n"
+            "`!corp info <business>` — show info about a business (name or ID)\n"
+            "`!corp pay <business> <@user/business> <amount>` — pay from a business bank account\n"
+            "`!corp grantpay <business> <@user/business> <amount>` — pay from a business grant balance\n"
+            "`!corp deposit <business> <amount>` — deposit SC from your balance into a business\n"
+            "**Payroll Commands**\n"
+            "`!corp payroll add <business> <@user/id/name> <amount> <bank|grant>` — add a daily payroll entry\n"
+            "`!corp payroll rm <payroll_id>` — remove a payroll entry\n"
+            "`!corp payroll list <payroll_id>` — look up a specific payroll by UUID\n"
+            "`!corp payroll list <business>` — list all payrolls for a business (name or ID)\n"
+            "`!corp payroll run` — manually trigger payroll processing\n"
         )
 
     @dir.command(name="bj")

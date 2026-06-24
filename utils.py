@@ -109,6 +109,10 @@ def mass_redistribute_shiftycoin():
         cents = share_cents + (1 if idx < remainder else 0)
         new_balances[uid] = round(cents / 100.0, 2)
     save_shiftycoin(new_balances)
+    log_transactions_batch([
+        {"type": "redistribution", "from_id": "system:redistribution", "to_id": uid, "amount": bal}
+        for uid, bal in new_balances.items()
+    ])
     return new_balances
 
 # betting json logic for bj (renamed from 'bet' to avoid collision with the bet command group)
@@ -287,6 +291,7 @@ def take_loan_for_user(user_id, amount):
     rec["last_accrued"] = _first_of_month(_today_date()).isoformat()
     set_loan_record(user_id, rec)
     add_balance(user_id, amount)
+    log_transaction("loan_take", "system:bank", str(user_id), round(amount, 2))
     return rec
 
 def repay_loan_for_user(user_id, amount):
@@ -311,10 +316,12 @@ def repay_loan_for_user(user_id, amount):
         set_loan_record(user_id, rec)
         if over > 0:
             add_balance(user_id, over)
+        log_transaction("loan_repay", str(user_id), "system:bank", -round(repaid, 2))
         return rec, round(repaid, 2), over
     else:
         rec["balance"] = round(balance - repay, 2)
         set_loan_record(user_id, rec)
+        log_transaction("loan_repay", str(user_id), "system:bank", -repay)
         return rec, repay, 0.0
 
 def accrue_interest_all():
@@ -426,6 +433,7 @@ def pay_from_business(identifier: str, payer_id: int, to_user_id, amount: float)
         raise ValueError("Business has insufficient funds.")
     add_balance(acct, -round(amount, 2))
     add_balance(to_user_id, round(amount, 2))
+    log_transaction("business_pay", str(acct), str(to_user_id), amount, {"business_id": bid, "business_name": rec.get("name")})
     shiftycoin = load_shiftycoin()
     return round(float(shiftycoin.get(str(acct), 0.0)), 2)
 
@@ -514,6 +522,7 @@ def collect_taxes(force: bool = False):
 
     total_collected = 0.0
     per_user = {}
+    tax_log_entries = []
     for uid in sorted(shiftycoin.keys()):
         if str(uid) == str(TAX_ACCOUNT):
             continue
@@ -530,12 +539,15 @@ def collect_taxes(force: bool = False):
         shiftycoin[uid] = new_user_bal
         per_user[uid] = tax
         total_collected = round(total_collected + tax, 2)
+        tax_log_entries.append({"type": "tax", "from_id": uid, "to_id": TAX_ACCOUNT, "amount": -tax})
 
     if total_collected > 0:
         treasury_bal = float(shiftycoin.get(str(TAX_ACCOUNT), 0.0))
         shiftycoin[str(TAX_ACCOUNT)] = round(treasury_bal + total_collected, 2)
 
     save_shiftycoin(shiftycoin)
+    if tax_log_entries:
+        log_transactions_batch(tax_log_entries)
     info["last_collected"] = _first_of_month(_today_date()).isoformat()
     info["months_since_last_collection"] = months if months > 0 else 1
     audit = info.get("audit", [])
@@ -733,6 +745,7 @@ async def _process_payrolls():
             p["last_paid"] = today.isoformat()
             payrolls[pid] = p
             processed.append({"id": pid, "paid": total_due, "days": days_due})
+            log_transaction("payroll", str(acct), str(recipient), total_due, {"payroll_id": pid, "business_id": bid, "days": days_due})
         else:  # grant
             grant_bal = round(float(biz.get("grant_balance", 0.0)), 2)
             if grant_bal < total_due:
@@ -744,6 +757,7 @@ async def _process_payrolls():
             p["last_paid"] = today.isoformat()
             payrolls[pid] = p
             processed.append({"id": pid, "paid": total_due, "days": days_due})
+            log_transaction("payroll", f"grant:{bid}", str(recipient), total_due, {"payroll_id": pid, "business_id": bid, "days": days_due})
 
     save_payrolls(payrolls)
     return {"processed": processed, "skipped": skipped}
@@ -900,3 +914,85 @@ def list_api_keys() -> list:
         }
         for key, rec in keys.items()
     ]
+
+
+# transaction ledger
+LEDGER_FILE = "ledger.json"
+
+
+def load_ledger() -> dict:
+    if os.path.exists(LEDGER_FILE):
+        try:
+            with open(LEDGER_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_ledger(data: dict):
+    try:
+        with open(LEDGER_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def log_transaction(tx_type: str, from_id, to_id, amount: float, metadata: dict = None) -> str:
+    """Append a transaction to the ledger and return its UUID."""
+    tx_id = str(uuid.uuid4())
+    ledger = load_ledger()
+    entry = {
+        "id": tx_id,
+        "type": tx_type,
+        "from_id": str(from_id) if from_id is not None else None,
+        "to_id": str(to_id) if to_id is not None else None,
+        "amount": round(float(amount), 2),
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    if metadata:
+        entry["metadata"] = metadata
+    ledger[tx_id] = entry
+    save_ledger(ledger)
+    return tx_id
+
+
+def log_transactions_batch(entries: list) -> list:
+    """Log multiple transactions in a single file read/write. Returns list of tx_ids."""
+    if not entries:
+        return []
+    ledger = load_ledger()
+    tx_ids = []
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    for e in entries:
+        tx_id = str(uuid.uuid4())
+        record = {
+            "id": tx_id,
+            "type": e["type"],
+            "from_id": str(e["from_id"]) if e.get("from_id") is not None else None,
+            "to_id": str(e["to_id"]) if e.get("to_id") is not None else None,
+            "amount": round(float(e["amount"]), 2),
+            "timestamp": now,
+        }
+        if e.get("metadata"):
+            record["metadata"] = e["metadata"]
+        ledger[tx_id] = record
+        tx_ids.append(tx_id)
+    save_ledger(ledger)
+    return tx_ids
+
+
+def get_transaction(tx_id: str) -> dict | None:
+    return load_ledger().get(tx_id)
+
+
+def get_transactions_for_user(user_id: str, limit: int = 50) -> list:
+    """Return up to `limit` transactions involving user_id, most recent first."""
+    uid = str(user_id)
+    ledger = load_ledger()
+    results = [
+        tx for tx in ledger.values()
+        if str(tx.get("from_id")) == uid or str(tx.get("to_id")) == uid
+    ]
+    results.sort(key=lambda tx: tx.get("timestamp", ""), reverse=True)
+    return results[:limit]

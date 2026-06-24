@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 from utils import (
     load_bets, save_bets, get_balance, add_balance, check_message_reactions,
-    BET_EMOJIS
+    BET_EMOJIS, log_transaction,
 )
 from utils import OID
 
@@ -77,6 +77,7 @@ class BettingCog(commands.Cog, name="Betting"):
             return
 
         add_balance(uid, -round(b["amount"], 2))
+        log_transaction("bet_join", str(uid), f"bet:{mid}", -round(b["amount"], 2), {"bet_id": mid, "option": option_index})
         b["entries"][uid] = option_index
         bets[mid] = b
         save_bets(bets)
@@ -111,6 +112,7 @@ class BettingCog(commands.Cog, name="Betting"):
             return
         b["entries"].pop(uid, None)
         add_balance(uid, round(b["amount"], 2))
+        log_transaction("bet_leave", f"bet:{mid}", str(uid), round(b["amount"], 2), {"bet_id": mid})
         bets[mid] = b
         save_bets(bets)
         try:
@@ -272,6 +274,7 @@ class BettingCog(commands.Cog, name="Betting"):
                 if uid not in new_entries_map:
                     try:
                         add_balance(uid, stake)
+                        log_transaction("bet_refund", f"bet:{message_id}", str(uid), stake, {"bet_id": message_id, "reason": "entry_removed"})
                     except Exception:
                         pass
                     stored.pop(uid, None)
@@ -301,6 +304,7 @@ class BettingCog(commands.Cog, name="Betting"):
 
                 try:
                     add_balance(uid, -stake)
+                    log_transaction("bet_join", str(uid), f"bet:{message_id}", -stake, {"bet_id": message_id, "reason": "reaction_reconcile"})
                     stored[uid] = opt_idx
                 except Exception:
                     pass
@@ -328,6 +332,7 @@ class BettingCog(commands.Cog, name="Betting"):
             for uid in entries.keys():
                 try:
                     add_balance(uid, round(amount, 2))
+                    log_transaction("bet_refund", f"bet:{message_id}", str(uid), round(amount, 2), {"bet_id": message_id, "reason": "no_winners"})
                 except Exception:
                     pass
             b["resolved"] = True
@@ -339,6 +344,7 @@ class BettingCog(commands.Cog, name="Betting"):
             for uid in winners:
                 try:
                     add_balance(uid, payout_each)
+                    log_transaction("bet_payout", f"bet:{message_id}", str(uid), payout_each, {"bet_id": message_id, "winning_option": winning, "pool": total_pool})
                 except Exception:
                     pass
             b["resolved"] = True
@@ -401,6 +407,7 @@ class BettingCog(commands.Cog, name="Betting"):
             for uid in list(entries.keys()):
                 try:
                     add_balance(uid, amount)
+                    log_transaction("bet_refund", f"bet:{message_id}", str(uid), amount, {"bet_id": message_id, "reason": "cancelled"})
                     refunded_count += 1
                 except Exception:
                     pass
@@ -456,6 +463,7 @@ class BettingCog(commands.Cog, name="Betting"):
 
         amount = round(float(b.get("amount", 0.0)), 2)
         add_balance(ctx.author.id, amount)
+        log_transaction("bet_leave", f"bet:{message_id}", str(ctx.author.id), amount, {"bet_id": message_id})
 
         b["entries"] = entries
         bets[message_id] = b

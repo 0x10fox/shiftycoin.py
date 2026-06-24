@@ -1,6 +1,7 @@
 from discord.ext import commands
 from utils import (
-    BlackjackGame, score_hand, hand_str, get_balance, add_balance, add_bet, get_bet
+    BlackjackGame, score_hand, hand_str, get_balance, add_balance, add_bet, get_bet,
+    log_transaction,
 )
 
 ACTIVE_GAMES = {}
@@ -49,6 +50,10 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
         if game.evaluateSC(uid) != 0:
             scChange = game.evaluateSC(uid)
             newBalance = add_balance(uid, scChange)
+            if scChange > 0:
+                log_transaction("blackjack", "system:blackjack", str(uid), scChange, {"result": "win"})
+            else:
+                log_transaction("blackjack", str(uid), "system:blackjack", -abs(scChange), {"result": "loss"})
             await ctx.send(f"SC earned/lost: {scChange}. New balance: {newBalance} SC")
 
     @bj.command(name="hit")
@@ -70,6 +75,10 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
             if game.evaluateSC(uid) != 0:
                 scChange = game.evaluateSC(uid)
                 newBalance = add_balance(uid, scChange)
+                if scChange > 0:
+                    log_transaction("blackjack", "system:blackjack", str(uid), scChange, {"result": "win"})
+                else:
+                    log_transaction("blackjack", str(uid), "system:blackjack", -abs(scChange), {"result": "loss"})
                 await ctx.send(f"SC earned/lost: {scChange}. New balance: {newBalance} SC")
         elif pscore == 21:
             game.dealer_play()
@@ -81,6 +90,10 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
             if game.evaluateSC(uid) != 0:
                 scChange = game.evaluateSC(uid)
                 newBalance = add_balance(uid, scChange)
+                if scChange > 0:
+                    log_transaction("blackjack", "system:blackjack", str(uid), scChange, {"result": "win"})
+                else:
+                    log_transaction("blackjack", str(uid), "system:blackjack", -abs(scChange), {"result": "loss"})
                 await ctx.send(f"SC earned/lost: {scChange}. New balance: {newBalance} SC")
         else:
             await ctx.send(
@@ -105,6 +118,10 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
         if game.evaluateSC(uid) != 0:
             scChange = game.evaluateSC(uid)
             newBalance = add_balance(uid, scChange)
+            if scChange > 0:
+                log_transaction("blackjack", "system:blackjack", str(uid), scChange, {"result": "win"})
+            else:
+                log_transaction("blackjack", str(uid), "system:blackjack", -abs(scChange), {"result": "loss"})
             await ctx.send(f"SC earned/lost: {scChange}. New balance: {newBalance} SC")
 
     @bj.command(name="hand")

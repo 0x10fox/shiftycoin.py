@@ -1,6 +1,7 @@
 import uuid
 import datetime
-from fastapi import FastAPI, HTTPException, Depends, Header
+import discord
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from utils import (
@@ -11,6 +12,7 @@ from utils import (
     load_businesses, save_businesses,
     load_payrolls, save_payrolls, _process_payrolls,
     collect_taxes, TAX_ACCOUNT,
+    log_transaction, get_transaction, get_transactions_for_user,
     OID,
 )
 
@@ -158,6 +160,9 @@ class CollectTaxRequest(BaseModel):
 class BureauGrantRequest(BaseModel):
     amount: float = Field(gt=0)
 
+class DMRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000, description="Message content to DM the user")
+
 
 # ── Read: self ─────────────────────────────────────────────────────────────────
 
@@ -177,13 +182,16 @@ async def get_my_loan(discord_id: str = Depends(_current_user)):
 async def get_my_businesses(discord_id: str = Depends(_current_user)):
     return _user_summary(discord_id)["businesses"]
 
-@app.get("/leaderboard", summary="All balances sorted descending")
+@app.get("/leaderboard", summary="Top 10 balances sorted descending (excludes treasury)")
 async def get_leaderboard(discord_id: str = Depends(_current_user)):
     shiftycoin = load_shiftycoin()
-    return [
-        {"discord_id": uid, "balance": float(bal)}
-        for uid, bal in sorted(shiftycoin.items(), key=lambda kv: -float(kv[1]))
-    ]
+    filtered = (
+        (uid, float(bal))
+        for uid, bal in shiftycoin.items()
+        if str(uid) != str(TAX_ACCOUNT)
+    )
+    top10 = sorted(filtered, key=lambda kv: -kv[1])[:10]
+    return [{"discord_id": uid, "balance": bal} for uid, bal in top10]
 
 
 # ── Write: SC ─────────────────────────────────────────────────────────────────
@@ -198,11 +206,13 @@ async def send_sc(body: SendRequest, discord_id: str = Depends(_current_user)):
         raise HTTPException(status_code=400, detail=f"Insufficient balance ({bal:.2f} SC available).")
     add_balance(discord_id, -amount)
     new_receiver_bal = add_balance(body.to_user_id, amount)
+    tx_id = log_transaction("send", discord_id, body.to_user_id, amount)
     return {
         "sent": amount,
         "to_user_id": body.to_user_id,
         "your_new_balance": float(get_balance(discord_id)),
         "recipient_new_balance": float(new_receiver_bal),
+        "transaction_id": tx_id,
     }
 
 
@@ -274,6 +284,7 @@ async def business_deposit(business_id: str, body: DepositRequest, discord_id: s
         raise HTTPException(status_code=400, detail=f"Insufficient balance ({bal:.2f} SC available).")
     add_balance(discord_id, -amount)
     new_acct_bal = add_balance(rec["account_key"], amount)
+    log_transaction("deposit", discord_id, rec["account_key"], -amount, {"business_id": bid, "business_name": rec["name"]})
     return {
         "deposited": amount,
         "your_new_balance": float(get_balance(discord_id)),
@@ -320,6 +331,7 @@ async def business_grantpay(business_id: str, body: BusinessPayRequest, discord_
 
     if kind == "business":
         new_target_bal = add_balance(target_id, amount)  # target_id is account_key here
+        log_transaction("grantpay", f"grant:{bid}", str(target_id), amount, {"payer_business_id": bid, "payer_business_name": rec["name"], "recipient_business": target_name})
         result = {
             "paid": amount,
             "from_business_grant": rec["name"],
@@ -329,6 +341,7 @@ async def business_grantpay(business_id: str, body: BusinessPayRequest, discord_
         }
     else:
         new_user_bal = add_balance(target_id, amount)
+        log_transaction("grantpay", f"grant:{bid}", str(target_id), amount, {"payer_business_id": bid, "payer_business_name": rec["name"]})
         result = {
             "paid": amount,
             "from_business_grant": rec["name"],
@@ -431,6 +444,7 @@ async def bureau_grant(business_id: str, body: BureauGrantRequest, _: str = Depe
     if tax_bal < amount:
         raise HTTPException(status_code=400, detail=f"Treasury has insufficient funds ({tax_bal:.2f} SC available).")
     add_balance(TAX_ACCOUNT, -amount)
+    log_transaction("bureau_grant", str(TAX_ACCOUNT), f"grant:{bid}", amount, {"business_id": bid, "business_name": rec["name"]})
     businesses = load_businesses()
     businesses[bid]["grant_balance"] = round(float(businesses[bid].get("grant_balance", 0.0)) + amount, 2)
     save_businesses(businesses)
@@ -459,3 +473,66 @@ async def admin_redistribute(_: str = Depends(_owner_only)):
     if not new_balances:
         raise HTTPException(status_code=400, detail="No balances to redistribute.")
     return {"redistributed_to": len(new_balances), "balances": new_balances}
+
+
+# ── Transaction ledger ────────────────────────────────────────────────────────
+
+@app.get("/ledger/{tx_id}", summary="Look up a transaction by its UUID")
+async def ledger_get(tx_id: str, discord_id: str = Depends(_current_user)):
+    tx = get_transaction(tx_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    return tx
+
+@app.get("/me/ledger", summary="Your recent transactions (up to 50)")
+async def my_ledger(discord_id: str = Depends(_current_user)):
+    return get_transactions_for_user(discord_id)
+
+@app.get("/admin/users/{user_id}/ledger", summary="Recent transactions for any user [owner only]")
+async def admin_user_ledger(user_id: str, _: str = Depends(_owner_only)):
+    return get_transactions_for_user(user_id)
+
+
+# ── Payroll by ID ─────────────────────────────────────────────────────────────
+
+@app.get("/payroll/{payroll_id}", summary="Look up a payroll entry by its UUID")
+async def get_payroll_by_id(payroll_id: str, discord_id: str = Depends(_current_user)):
+    payrolls = load_payrolls()
+    p = payrolls.get(payroll_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Payroll not found.")
+    return p
+
+
+# ── Bot DM (app-key only, no user token required) ────────────────────────────
+
+@app.post("/dm/{user_id}", summary="Send a DM to a Shiftycoin user via the bot (app key only)")
+async def send_dm(user_id: str, body: DMRequest, request: Request, _: dict = Depends(_require_app_key)):
+    shiftycoin = load_shiftycoin()
+    if str(user_id) not in shiftycoin:
+        raise HTTPException(status_code=404, detail="User not found in Shiftycoin ledger.")
+
+    bot = getattr(request.app.state, "bot", None)
+    if bot is None:
+        raise HTTPException(status_code=503, detail="Discord bot is not attached to app state.")
+
+    try:
+        uid_int = int(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="user_id must be a numeric Discord ID.")
+
+    try:
+        user = bot.get_user(uid_int) or await bot.fetch_user(uid_int)
+    except discord.NotFound:
+        raise HTTPException(status_code=404, detail=f"Discord user {user_id} not found.")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch Discord user: {e}")
+
+    try:
+        await user.send(body.content)
+    except discord.Forbidden:
+        raise HTTPException(status_code=403, detail="User has DMs disabled or has blocked the bot.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send DM: {e}")
+
+    return {"sent": True, "user_id": user_id}
